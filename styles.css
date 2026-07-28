@@ -206,6 +206,19 @@ button, input, select, textarea {
   border-top: 1px solid var(--green-100);
   flex-wrap: wrap;
 }
+.agenda-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+}
+.agenda-header-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
 .agenda-checkbox {
   width: 22px;
   height: 22px;
@@ -234,12 +247,15 @@ button, input, select, textarea {
   color: var(--green-700);
 }
 .agenda-info { flex: 1; min-width: 140px; }
-.agenda-horse { font-weight: 700; }
+.agenda-horse { font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agenda-rider { color: var(--text-muted); font-size: 0.9rem; }
 .agenda-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: nowrap; }
+.agenda-other-actions { display: flex; align-items: center; gap: 6px; }
 @media (max-width: 600px) {
-  .agenda-row { gap: 10px; padding: 10px 12px; }
-  .agenda-actions { margin-left: 0; }
+  .agenda-row { gap: 10px; padding: 10px 12px; flex-wrap: nowrap; align-items: flex-start; }
+  .agenda-left { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .agenda-actions { flex-direction: column; align-items: flex-end; gap: 6px; margin-left: 8px; flex-shrink: 0; }
+  .agenda-other-actions { justify-content: flex-end; flex-wrap: wrap; }
 }
 .empty-note { padding: 24px; text-align: center; color: var(--text-muted); }
 
