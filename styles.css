@@ -214,16 +214,22 @@ button, input, select, textarea {
 
 /* ---------- Day navigator ---------- */
 .day-nav {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   background: var(--white);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 10px 16px;
+  padding: 14px 16px;
   margin-bottom: 14px;
 }
-.day-nav-label { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--green-900); }
+.day-nav-label {
+  text-align: center;
+  font-weight: 700;
+  color: var(--green-900);
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+  word-break: break-word;
+}
+.day-nav-buttons { display: flex; gap: 8px; }
+.day-nav-buttons .btn { flex: 1; white-space: nowrap; }
 
 /* ---------- Horse thumbnails ---------- */
 .horse-thumb {
