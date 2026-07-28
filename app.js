@@ -627,35 +627,38 @@ function renderDayAgenda(events) {
       row = el(
         "div",
         { class: "agenda-row" + (isCompleted ? " completed" : "") },
-        el("input", checkboxAttrs),
-        el("div", { class: "agenda-time" }, time),
-        avatarEl(student, "small"),
         el(
           "div",
-          { class: "agenda-info" },
+          { class: "agenda-top-line" },
+          el("input", checkboxAttrs),
+          el("div", { class: "agenda-time" }, time),
+          avatarEl(student, "small"),
           el(
             "div",
-            { class: "agenda-horse" },
-            el("span", { class: "type-badge lesson" }, "Lesson"),
-            displayName,
-            isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+            { class: "agenda-info" },
+            el(
+              "div",
+              { class: "agenda-horse" },
+              el("span", { class: "type-badge lesson" }, "Lesson"),
+              displayName,
+              isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+            ),
+            el("div", { class: "agenda-rider" }, props.instructor ? "Instructor: " + props.instructor : "")
           ),
-          el("div", { class: "agenda-rider" }, props.instructor ? "Instructor: " + props.instructor : "")
+          el("button", { class: "btn btn-ghost btn-icon danger agenda-trash", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         ),
         el(
           "div",
           { class: "agenda-actions" },
-          evt.htmlLink ? el("a", { class: "btn btn-ghost btn-icon", title: "Open in Google Calendar", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "🗓️") : null,
+          evt.htmlLink ? el("a", { class: "btn btn-ghost small", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
           el("button", {
-            class: "btn btn-ghost btn-icon",
-            title: "Log Lesson",
+            class: "btn btn-ghost small",
             onclick: () => {
               if (student) openLessonLogModal(student.id, horse ? horse.id : "", state.scheduleDate);
               else showToast("This lesson isn't linked to a student profile.", true);
             },
-          }, "📝"),
-          el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openLessonModal(evt) }, "✏️"),
-          el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
+          }, "Log Lesson"),
+          el("button", { class: "btn btn-ghost small", onclick: () => openLessonModal(evt) }, "Edit")
         )
       );
     } else {
@@ -665,35 +668,38 @@ function renderDayAgenda(events) {
       row = el(
         "div",
         { class: "agenda-row" + (isCompleted ? " completed" : "") },
-        el("input", checkboxAttrs),
-        el("div", { class: "agenda-time" }, time),
-        avatarEl(horse, "small"),
         el(
           "div",
-          { class: "agenda-info" },
+          { class: "agenda-top-line" },
+          el("input", checkboxAttrs),
+          el("div", { class: "agenda-time" }, time),
+          avatarEl(horse, "small"),
           el(
             "div",
-            { class: "agenda-horse" },
-            el("span", { class: "type-badge" }, "Work"),
-            horseName,
-            isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+            { class: "agenda-info" },
+            el(
+              "div",
+              { class: "agenda-horse" },
+              el("span", { class: "type-badge" }, "Work"),
+              horseName,
+              isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+            ),
+            el("div", { class: "agenda-rider" }, rider ? "Rider: " + rider : "")
           ),
-          el("div", { class: "agenda-rider" }, rider ? "Rider: " + rider : "")
+          el("button", { class: "btn btn-ghost btn-icon danger agenda-trash", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         ),
         el(
           "div",
           { class: "agenda-actions" },
-          evt.htmlLink ? el("a", { class: "btn btn-ghost btn-icon", title: "Open in Google Calendar", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "🗓️") : null,
+          evt.htmlLink ? el("a", { class: "btn btn-ghost small", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
           el("button", {
-            class: "btn btn-ghost btn-icon",
-            title: "Log Report Card",
+            class: "btn btn-ghost small",
             onclick: () => {
               if (horse) openReportCardModal(horse.id, state.scheduleDate);
               else showToast("This session isn't linked to a horse profile.", true);
             },
-          }, "📝"),
-          el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openSessionModal(evt) }, "✏️"),
-          el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
+          }, "Log Report Card"),
+          el("button", { class: "btn btn-ghost small", onclick: () => openSessionModal(evt) }, "Edit")
         )
       );
     }
