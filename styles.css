@@ -156,6 +156,17 @@ button, input, select, textarea {
   flex-wrap: wrap;
 }
 .view-header h1, .view-header h2 { color: var(--green-900); margin: 0; }
+.header-btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+.type-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--green-600);
+  color: var(--white);
+  margin-right: 6px;
+}
+.type-badge.lesson { background: var(--amber); }
 .muted { color: var(--text-muted); }
 .small { font-size: 0.85rem; }
 
@@ -192,13 +203,81 @@ button, input, select, textarea {
 .agenda-actions { display: flex; gap: 8px; }
 .empty-note { padding: 24px; text-align: center; color: var(--text-muted); }
 
-.calendar-embed-toggle { margin: 20px 0 8px; }
+.calendar-embed-toggle { margin: 0 0 14px; }
 .calendar-embed-wrap {
   background: var(--white);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 10px;
+  margin-bottom: 18px;
 }
+
+/* ---------- Day navigator ---------- */
+.day-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--white);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px 16px;
+  margin-bottom: 14px;
+}
+.day-nav-label { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--green-900); }
+
+/* ---------- Horse thumbnails ---------- */
+.horse-thumb {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--green-200);
+  flex-shrink: 0;
+}
+.horse-thumb-fallback {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--green-800);
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+.horse-thumb.large { width: 72px; height: 72px; font-size: 1.6rem; }
+.horse-thumb.small { width: 32px; height: 32px; font-size: 0.85rem; }
+.horse-card-top { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.horse-card-top h3 { margin: 0; }
+.profile-title-row { display: flex; align-items: center; gap: 14px; }
+
+.photo-preview-wrap { display: flex; align-items: center; gap: 10px; }
+.photo-preview {
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--green-100);
+}
+
+/* ---------- Week schedule strip ---------- */
+.week-schedule-card {
+  background: var(--white);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  margin-bottom: 24px;
+}
+.week-schedule-card h3 { margin: 0 0 10px; color: var(--green-900); font-size: 1rem; }
+.week-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.week-day {
+  flex: 1;
+  min-width: 78px;
+  border: 1.5px solid var(--green-200);
+  border-radius: 8px;
+  padding: 8px 6px;
+  text-align: center;
+}
+.week-day .wd-label { font-weight: 700; font-size: 0.8rem; color: var(--text-muted); }
+.week-day .wd-date { font-size: 0.75rem; color: var(--text-muted); }
+.week-day .wd-time { font-size: 0.75rem; color: var(--green-800); font-weight: 600; margin-top: 4px; }
+.week-day.scheduled { background: var(--green-100); border-color: var(--green-500); }
+.week-day.today { border-color: var(--green-700); border-width: 2px; }
+.agenda-cal-link { font-size: 0.8rem; color: var(--green-700); text-decoration: none; }
+.agenda-cal-link:hover { text-decoration: underline; }
 
 /* ---------- Horses grid ---------- */
 .filter-row { display: flex; gap: 8px; margin-bottom: 16px; }

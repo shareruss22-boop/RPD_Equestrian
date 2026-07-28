@@ -1,5 +1,5 @@
 /* =========================================================
-   RPD EQUESTRIAN — Barn schedule & horse tracking app
+   RPD EQUESTRIAN — Barn schedule, horse & student tracking app
    Static, client-side only. Talks directly to Google Calendar
    & Google Drive APIs using the signed-in user's OAuth token.
    ========================================================= */
@@ -12,6 +12,7 @@ const CONFIG = {
   SCOPES: "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive",
   APP_FOLDER_NAME: "RPD Equestrian Data",
   MEDIA_FOLDER_NAME: "Media",
+  PROFILES_FOLDER_NAME: "Profiles",
   DB_FILE_NAME: "database.json",
   TIMEZONE: "America/New_York",
 };
@@ -21,13 +22,18 @@ const state = {
   accessToken: null,
   tokenExpiresAt: 0,
   tokenClient: null,
+  refreshTimer: null,
   appFolderId: null,
   mediaFolderId: null,
+  profilesFolderId: null,
   dbFileId: null,
-  db: { horses: [], reportCards: [] },
+  db: { horses: [], reportCards: [], students: [], lessonLogs: [] },
   currentView: "schedule",
   currentHorseId: null,
+  currentStudentId: null,
   horseFilter: "active",
+  studentFilter: "active",
+  scheduleDate: null, // set once utils are defined
 };
 
 /* ---------------- UTIL ---------------- */
@@ -70,24 +76,68 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function fmtDateHuman(dateStr) {
-  const d = new Date(dateStr + "T00:00:00");
-  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
-}
-
-function fmtTimeHuman(iso) {
-  const d = new Date(iso);
-  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+/* ---- Timezone-safe date helpers (always pinned to the barn's timezone,
+   regardless of what timezone the viewing device happens to be set to) ---- */
+function nyParts(d) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CONFIG.TIMEZONE,
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(d);
+  const map = {};
+  parts.forEach((p) => (map[p.type] = p.value));
+  return map;
 }
 
 function todayStr() {
-  const d = new Date();
+  const p = nyParts(new Date());
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function nyDateStringFromISO(iso) {
+  const p = nyParts(new Date(iso));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function fmtDateHuman(dateStr) {
+  const d = new Date(dateStr + "T12:00:00Z");
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function fmtDateShort(dateStr) {
+  const d = new Date(dateStr + "T12:00:00Z");
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function fmtTimeHuman(iso) {
+  return new Intl.DateTimeFormat(undefined, { timeZone: CONFIG.TIMEZONE, hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+}
+
+function addDaysToDateStr(dateStr, days) {
+  const d = new Date(dateStr + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
+function weekdayIndexOf(dateStr) {
+  return new Date(dateStr + "T12:00:00Z").getUTCDay(); // 0=Sun..6=Sat
+}
+
+function addOneHourToTime(timeStr, dateStr) {
+  let [h, m] = timeStr.split(":").map(Number);
+  h += 1;
+  let outDate = dateStr;
+  if (h >= 24) {
+    h -= 24;
+    outDate = addDaysToDateStr(dateStr, 1);
+  }
+  return { time: `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`, date: outDate };
+}
+
+state.scheduleDate = todayStr();
+
 /* ---------------- VIEW SWITCHING ---------------- */
 function showOnly(id) {
-  ["signedOutView", "loadingView", "errorView", "scheduleView", "horsesView", "horseProfileView"].forEach((v) => {
+  ["signedOutView", "loadingView", "errorView", "scheduleView", "horsesView", "horseProfileView", "studentsView", "studentProfileView"].forEach((v) => {
     $("#" + v).hidden = v !== id;
   });
 }
@@ -105,41 +155,83 @@ function setError(msg, retryFn) {
 }
 
 /* =========================================================
-   AUTH
+   AUTH — sign in once, stay signed in across visits as long as
+   the browser still has an active Google session (silent refresh).
    ========================================================= */
 function initAuth() {
   state.tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CONFIG.CLIENT_ID,
     scope: CONFIG.SCOPES,
-    callback: async (resp) => {
-      if (resp.error) {
-        setError("Sign-in was cancelled or failed: " + resp.error);
-        return;
-      }
-      state.accessToken = resp.access_token;
-      state.tokenExpiresAt = Date.now() + (resp.expires_in || 3500) * 1000;
-      sessionStorage.setItem("rpd_token", state.accessToken);
-      sessionStorage.setItem("rpd_token_exp", String(state.tokenExpiresAt));
-      onSignedIn();
-    },
+    callback: handleTokenResponse,
   });
 
-  // Try to resume a session-stored token
+  $("#signInBtn").addEventListener("click", () => requestSignIn(true));
+  $("#signInBtn2").addEventListener("click", () => requestSignIn(true));
+  $("#signOutBtn").addEventListener("click", signOut);
+
+  attemptAutoSignIn();
+}
+
+function handleTokenResponse(resp) {
+  if (resp.error) {
+    if (!state.accessToken) showOnly("signedOutView");
+    return;
+  }
+  state.accessToken = resp.access_token;
+  state.tokenExpiresAt = Date.now() + (resp.expires_in || 3500) * 1000;
+  sessionStorage.setItem("rpd_token", state.accessToken);
+  sessionStorage.setItem("rpd_token_exp", String(state.tokenExpiresAt));
+  localStorage.setItem("rpd_has_signed_in", "1");
+  scheduleTokenRefresh();
+  onSignedIn();
+}
+
+function attemptAutoSignIn() {
   const savedToken = sessionStorage.getItem("rpd_token");
   const savedExp = Number(sessionStorage.getItem("rpd_token_exp") || 0);
   if (savedToken && savedExp > Date.now() + 60000) {
     state.accessToken = savedToken;
     state.tokenExpiresAt = savedExp;
+    scheduleTokenRefresh();
     onSignedIn();
+    return;
   }
-
-  $("#signInBtn").addEventListener("click", requestSignIn);
-  $("#signInBtn2").addEventListener("click", requestSignIn);
-  $("#signOutBtn").addEventListener("click", signOut);
+  if (localStorage.getItem("rpd_has_signed_in")) {
+    setLoading("Signing you back in…");
+    state.tokenClient.requestAccessToken({ prompt: "" });
+  } else {
+    showOnly("signedOutView");
+  }
 }
 
-function requestSignIn() {
-  state.tokenClient.requestAccessToken({ prompt: state.accessToken ? "" : "consent" });
+function requestSignIn(interactive) {
+  state.tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
+}
+
+function scheduleTokenRefresh() {
+  clearTimeout(state.refreshTimer);
+  const msUntilRefresh = Math.max(state.tokenExpiresAt - Date.now() - 5 * 60 * 1000, 30000);
+  state.refreshTimer = setTimeout(() => {
+    state.tokenClient.requestAccessToken({ prompt: "" });
+  }, msUntilRefresh);
+}
+
+function trySilentRefresh() {
+  return new Promise((resolve) => {
+    if (!state.tokenClient) { resolve(false); return; }
+    state.tokenClient.requestAccessToken({
+      prompt: "",
+      callback: (resp) => {
+        if (resp.error) { resolve(false); return; }
+        state.accessToken = resp.access_token;
+        state.tokenExpiresAt = Date.now() + (resp.expires_in || 3500) * 1000;
+        sessionStorage.setItem("rpd_token", state.accessToken);
+        sessionStorage.setItem("rpd_token_exp", String(state.tokenExpiresAt));
+        scheduleTokenRefresh();
+        resolve(true);
+      },
+    });
+  });
 }
 
 function signOut() {
@@ -148,6 +240,8 @@ function signOut() {
   }
   sessionStorage.removeItem("rpd_token");
   sessionStorage.removeItem("rpd_token_exp");
+  localStorage.removeItem("rpd_has_signed_in");
+  clearTimeout(state.refreshTimer);
   state.accessToken = null;
   $("#mainNav").hidden = true;
   $("#userChip").hidden = true;
@@ -168,13 +262,17 @@ async function onSignedIn() {
 /* =========================================================
    GOOGLE API HELPERS (fetch-based, no client library needed)
    ========================================================= */
-async function apiFetch(url, options = {}) {
+async function apiFetch(url, options = {}, retried = false) {
   if (!state.accessToken) throw new Error("Not signed in");
   const headers = Object.assign({}, options.headers, {
     Authorization: "Bearer " + state.accessToken,
   });
   const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
+    if (!retried) {
+      const refreshed = await trySilentRefresh();
+      if (refreshed) return apiFetch(url, options, true);
+    }
     throw new Error("Your Google session expired. Please sign in again.");
   }
   if (!res.ok) {
@@ -246,7 +344,7 @@ async function driveUpdateJson(fileId, contentObj) {
   });
 }
 
-async function driveUploadMedia(file, parentId, onProgress) {
+async function driveUploadMedia(file, parentId) {
   const boundary = "rpdboundary" + Date.now() + Math.random().toString(16).slice(2);
   const metadata = { name: file.name, parents: [parentId] };
   const metaPart =
@@ -273,7 +371,6 @@ async function driveUploadMedia(file, parentId, onProgress) {
   );
   const created = await res.json();
 
-  // Make it viewable via link so it can be shared with owners / shown as thumbnail
   try {
     await apiFetch(`https://www.googleapis.com/drive/v3/files/${created.id}/permissions`, {
       method: "POST",
@@ -287,11 +384,14 @@ async function driveUploadMedia(file, parentId, onProgress) {
 }
 
 /* ---- Calendar ---- */
-async function calendarListEvents(timeMinISO, timeMaxISO) {
-  const url =
+async function calendarListEvents(timeMinISO, timeMaxISO, extraParams) {
+  let url =
     `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CONFIG.CALENDAR_ID)}/events` +
     `?timeMin=${encodeURIComponent(timeMinISO)}&timeMax=${encodeURIComponent(timeMaxISO)}` +
     `&singleEvents=true&orderBy=startTime&maxResults=250`;
+  if (extraParams && extraParams.privateExtendedProperty) {
+    url += `&privateExtendedProperty=${encodeURIComponent(extraParams.privateExtendedProperty)}`;
+  }
   const res = await apiFetch(url);
   const data = await res.json();
   return data.items || [];
@@ -313,7 +413,7 @@ async function calendarDeleteEvent(eventId) {
 }
 
 /* =========================================================
-   BOOTSTRAP — find/create Drive folder + database.json
+   BOOTSTRAP — find/create Drive folders + database.json
    ========================================================= */
 async function bootstrapData() {
   setLoading("Connecting to Google Drive…");
@@ -324,17 +424,22 @@ async function bootstrapData() {
     const mediaFolder = await driveFindOrCreateFolder(CONFIG.MEDIA_FOLDER_NAME, state.appFolderId);
     state.mediaFolderId = mediaFolder.id;
 
+    const profilesFolder = await driveFindOrCreateFolder(CONFIG.PROFILES_FOLDER_NAME, state.appFolderId);
+    state.profilesFolderId = profilesFolder.id;
+
     const q = `name='${CONFIG.DB_FILE_NAME}' and '${state.appFolderId}' in parents and trashed=false`;
     let dbFile = await driveFindOne(q);
     if (!dbFile) {
-      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [] });
+      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [], students: [], lessonLogs: [] });
     }
     state.dbFileId = dbFile.id;
 
-    setLoading("Loading horses & report cards…");
+    setLoading("Loading horses & students…");
     state.db = await driveGetJson(state.dbFileId);
     if (!state.db.horses) state.db.horses = [];
     if (!state.db.reportCards) state.db.reportCards = [];
+    if (!state.db.students) state.db.students = [];
+    if (!state.db.lessonLogs) state.db.lessonLogs = [];
 
     $("#calendarEmbed").src = CONFIG.CALENDAR_EMBED_SRC;
 
@@ -366,6 +471,13 @@ function navigate(view, param) {
     state.currentHorseId = param;
     showOnly("horseProfileView");
     renderHorseProfile(param);
+  } else if (view === "students") {
+    showOnly("studentsView");
+    renderStudents();
+  } else if (view === "student-profile") {
+    state.currentStudentId = param;
+    showOnly("studentProfileView");
+    renderStudentProfile(param);
   }
 }
 
@@ -374,89 +486,195 @@ document.querySelectorAll(".nav-link").forEach((btn) => {
 });
 
 /* =========================================================
-   SCHEDULE VIEW
+   AVATAR HELPER (shared by horse cards, student cards, profiles, agenda)
+   ========================================================= */
+function avatarEl(entity, sizeClass) {
+  const cls = "horse-thumb" + (sizeClass ? " " + sizeClass : "");
+  if (entity && entity.photo && entity.photo.thumbnailLink) {
+    return el("img", { class: cls, src: entity.photo.thumbnailLink, alt: entity.name || "" });
+  }
+  const initial = entity && entity.name ? entity.name.trim().charAt(0).toUpperCase() : "?";
+  return el("div", { class: cls + " horse-thumb-fallback" }, initial);
+}
+
+/* =========================================================
+   WEEK STRIP (reused by both horse profile and student profile)
+   ========================================================= */
+async function renderWeekStrip(containerSel, filterField, filterValue) {
+  const container = $(containerSel);
+  container.innerHTML = "<p class='muted small'>Loading this week's schedule…</p>";
+  try {
+    const today = todayStr();
+    const dow = weekdayIndexOf(today);
+    const weekStart = addDaysToDateStr(today, -dow);
+    const queryMin = `${addDaysToDateStr(weekStart, -1)}T00:00:00Z`;
+    const queryMax = `${addDaysToDateStr(weekStart, 8)}T00:00:00Z`;
+
+    const events = await calendarListEvents(queryMin, queryMax, { privateExtendedProperty: `${filterField}=${filterValue}` });
+
+    const byDate = {};
+    events.forEach((evt) => {
+      const startIso = evt.start.dateTime || evt.start.date + "T12:00:00Z";
+      const dateStr = nyDateStringFromISO(startIso);
+      (byDate[dateStr] = byDate[dateStr] || []).push(evt);
+    });
+
+    container.innerHTML = "";
+    const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    for (let i = 0; i < 7; i++) {
+      const dateStr = addDaysToDateStr(weekStart, i);
+      const dayEvents = byDate[dateStr] || [];
+      const isToday = dateStr === today;
+      const cell = el(
+        "div",
+        { class: "week-day" + (dayEvents.length ? " scheduled" : "") + (isToday ? " today" : "") },
+        el("div", { class: "wd-label" }, dayLabels[i]),
+        el("div", { class: "wd-date" }, fmtDateShort(dateStr))
+      );
+      dayEvents.forEach((evt) => {
+        const t = evt.start.dateTime ? fmtTimeHuman(evt.start.dateTime) : "All day";
+        cell.appendChild(el("div", { class: "wd-time" }, t));
+      });
+      container.appendChild(cell);
+    }
+  } catch (err) {
+    container.innerHTML = "";
+    container.appendChild(el("p", { class: "muted small" }, "Couldn't load this week's schedule."));
+  }
+}
+
+/* =========================================================
+   SCHEDULE VIEW — single day at a time, with a toggle at the
+   top to also show the full Google Calendar embed. Shows both
+   horse work sessions and student lessons together.
    ========================================================= */
 async function renderSchedule() {
+  updateDayNavLabel();
   const list = $("#agendaList");
   list.innerHTML = "<p class='muted'>Loading schedule…</p>";
   try {
-    const now = new Date();
-    const timeMin = new Date(now.getTime() - 3 * 24 * 3600 * 1000).toISOString();
-    const timeMax = new Date(now.getTime() + 21 * 24 * 3600 * 1000).toISOString();
+    const dayBefore = addDaysToDateStr(state.scheduleDate, -1);
+    const dayAfter = addDaysToDateStr(state.scheduleDate, 2);
+    const timeMin = `${dayBefore}T00:00:00Z`;
+    const timeMax = `${dayAfter}T00:00:00Z`;
     const events = await calendarListEvents(timeMin, timeMax);
-    renderAgenda(events);
+    const dayEvents = events.filter((evt) => {
+      const startIso = evt.start.dateTime ? evt.start.dateTime : evt.start.date + "T12:00:00Z";
+      return nyDateStringFromISO(startIso) === state.scheduleDate;
+    });
+    renderDayAgenda(dayEvents);
   } catch (err) {
     list.innerHTML = "";
     list.appendChild(el("p", { class: "empty-note" }, "Could not load the schedule: " + err.message));
   }
 }
 
-function renderAgenda(events) {
+function updateDayNavLabel() {
+  const label = fmtDateHuman(state.scheduleDate) + (state.scheduleDate === todayStr() ? " — Today" : "");
+  $("#dayNavLabel").textContent = label;
+}
+
+function renderDayAgenda(events) {
   const list = $("#agendaList");
   list.innerHTML = "";
   if (!events.length) {
-    list.appendChild(el("p", { class: "empty-note" }, "No work sessions scheduled. Click “+ Add Work Session” to get started."));
+    list.appendChild(el("p", { class: "empty-note" }, "No one scheduled for this day. Click “+ Add Work Session” or “+ Add Lesson” to get started."));
     return;
   }
-  const byDay = {};
+  const dayCard = el("div", { class: "agenda-day" });
   events.forEach((evt) => {
-    const startIso = evt.start.dateTime || evt.start.date;
-    const dayKey = startIso.slice(0, 10);
-    (byDay[dayKey] = byDay[dayKey] || []).push(evt);
-  });
+    const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+    const type = props.type || "work";
+    const time = evt.start.dateTime ? fmtTimeHuman(evt.start.dateTime) : "All day";
 
-  Object.keys(byDay).sort().forEach((day) => {
-    const dayCard = el("div", { class: "agenda-day" });
-    dayCard.appendChild(el("div", { class: "agenda-day-header" }, fmtDateHuman(day) + (day === todayStr() ? " — Today" : "")));
-    byDay[day].forEach((evt) => {
-      const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+    let row;
+    if (type === "lesson") {
+      const student = state.db.students.find((s) => s.id === props.studentId);
       const horse = state.db.horses.find((h) => h.id === props.horseId);
-      const horseName = horse ? horse.name : props.horseName || evt.summary || "Session";
-      const rider = props.rider || "";
-      const time = evt.start.dateTime ? fmtTimeHuman(evt.start.dateTime) : "All day";
-
-      const row = el(
+      const displayName = (student ? student.name : props.studentName || "Student") + (horse ? " — " + horse.name : "");
+      row = el(
         "div",
         { class: "agenda-row" },
         el("div", { class: "agenda-time" }, time),
+        avatarEl(student, "small"),
         el(
           "div",
           { class: "agenda-info" },
-          el("div", { class: "agenda-horse" }, horseName),
+          el("div", { class: "agenda-horse" }, el("span", { class: "type-badge lesson" }, "Lesson"), displayName),
+          el("div", { class: "agenda-rider" }, props.instructor ? "Instructor: " + props.instructor : "")
+        ),
+        el(
+          "div",
+          { class: "agenda-actions" },
+          evt.htmlLink ? el("a", { class: "agenda-cal-link", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
+          el("button", {
+            class: "btn btn-ghost small",
+            onclick: () => {
+              if (student) openLessonLogModal(student.id, horse ? horse.id : "", state.scheduleDate);
+              else showToast("This lesson isn't linked to a student profile.", true);
+            },
+          }, "Log Lesson"),
+          el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
+        )
+      );
+    } else {
+      const horse = state.db.horses.find((h) => h.id === props.horseId);
+      const horseName = horse ? horse.name : props.horseName || evt.summary || "Session";
+      const rider = props.rider || "";
+      row = el(
+        "div",
+        { class: "agenda-row" },
+        el("div", { class: "agenda-time" }, time),
+        avatarEl(horse, "small"),
+        el(
+          "div",
+          { class: "agenda-info" },
+          el("div", { class: "agenda-horse" }, el("span", { class: "type-badge" }, "Work"), horseName),
           el("div", { class: "agenda-rider" }, rider ? "Rider: " + rider : "")
         ),
         el(
           "div",
           { class: "agenda-actions" },
+          evt.htmlLink ? el("a", { class: "agenda-cal-link", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
           el("button", {
             class: "btn btn-ghost small",
             onclick: () => {
-              if (horse) openReportCardModal(horse.id, day);
+              if (horse) openReportCardModal(horse.id, state.scheduleDate);
               else showToast("This session isn't linked to a horse profile.", true);
             },
           }, "Log Report Card"),
-          el("button", {
-            class: "btn btn-ghost small",
-            onclick: () => deleteSession(evt.id),
-          }, "Cancel")
+          el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
         )
       );
-      dayCard.appendChild(row);
-    });
-    list.appendChild(dayCard);
+    }
+    dayCard.appendChild(row);
   });
+  list.appendChild(dayCard);
 }
 
 async function deleteSession(eventId) {
-  if (!confirm("Remove this work session from the schedule?")) return;
+  if (!confirm("Remove this from the schedule?")) return;
   try {
     await calendarDeleteEvent(eventId);
-    showToast("Session removed");
+    showToast("Removed from schedule");
     renderSchedule();
   } catch (err) {
-    showToast("Couldn't remove session: " + err.message, true);
+    showToast("Couldn't remove: " + err.message, true);
   }
 }
+
+$("#prevDayBtn").addEventListener("click", () => {
+  state.scheduleDate = addDaysToDateStr(state.scheduleDate, -1);
+  renderSchedule();
+});
+$("#nextDayBtn").addEventListener("click", () => {
+  state.scheduleDate = addDaysToDateStr(state.scheduleDate, 1);
+  renderSchedule();
+});
+$("#todayBtn").addEventListener("click", () => {
+  state.scheduleDate = todayStr();
+  renderSchedule();
+});
 
 $("#toggleEmbedBtn").addEventListener("click", () => {
   const wrap = $("#calendarEmbedWrap");
@@ -473,7 +691,7 @@ $("#addSessionBtn").addEventListener("click", () => {
     select.appendChild(el("option", { value: "" }, "No active horses — add one first"));
   }
   activeHorses.forEach((h) => select.appendChild(el("option", { value: h.id }, h.name)));
-  $("#sessionDate").value = todayStr();
+  $("#sessionDate").value = state.scheduleDate || todayStr();
   $("#sessionTime").value = "09:00";
   $("#sessionNotes").value = "";
   openModal("sessionModal");
@@ -488,10 +706,7 @@ $("#sessionForm").addEventListener("submit", async (e) => {
   const date = $("#sessionDate").value;
   const time = $("#sessionTime").value;
   const notes = $("#sessionNotes").value;
-
-  const startDateTime = `${date}T${time}:00`;
-  const startDate = new Date(startDateTime);
-  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+  const endInfo = addOneHourToTime(time, date);
 
   const submitBtn = e.target.querySelector("button[type=submit]");
   submitBtn.disabled = true;
@@ -499,15 +714,70 @@ $("#sessionForm").addEventListener("submit", async (e) => {
     await calendarCreateEvent({
       summary: `${horse.name} — ${rider}`,
       description: notes,
-      start: { dateTime: startDate.toISOString(), timeZone: CONFIG.TIMEZONE },
-      end: { dateTime: endDate.toISOString(), timeZone: CONFIG.TIMEZONE },
-      extendedProperties: { private: { horseId: horse.id, horseName: horse.name, rider } },
+      start: { dateTime: `${date}T${time}:00`, timeZone: CONFIG.TIMEZONE },
+      end: { dateTime: `${endInfo.date}T${endInfo.time}:00`, timeZone: CONFIG.TIMEZONE },
+      extendedProperties: { private: { type: "work", horseId: horse.id, horseName: horse.name, rider } },
     });
     closeModal("sessionModal");
-    showToast("Added to schedule");
+    showToast("Added to Google Calendar");
+    state.scheduleDate = date;
     renderSchedule();
   } catch (err) {
     showToast("Couldn't add session: " + err.message, true);
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+
+/* ---- Add Lesson modal ---- */
+$("#addLessonBtn").addEventListener("click", () => {
+  const activeStudents = state.db.students.filter((s) => s.active);
+  const studentSelect = $("#lessonStudent");
+  studentSelect.innerHTML = "";
+  if (!activeStudents.length) studentSelect.appendChild(el("option", { value: "" }, "No active students — add one first"));
+  activeStudents.forEach((s) => studentSelect.appendChild(el("option", { value: s.id }, s.name)));
+
+  const activeHorses = state.db.horses.filter((h) => h.active);
+  const horseSelect = $("#lessonHorse");
+  horseSelect.innerHTML = "";
+  if (!activeHorses.length) horseSelect.appendChild(el("option", { value: "" }, "No active horses — add one first"));
+  activeHorses.forEach((h) => horseSelect.appendChild(el("option", { value: h.id }, h.name)));
+
+  $("#lessonDate").value = state.scheduleDate || todayStr();
+  $("#lessonTime").value = "09:00";
+  $("#lessonNotes").value = "";
+  openModal("lessonModal");
+});
+
+$("#lessonForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const studentId = $("#lessonStudent").value;
+  const horseId = $("#lessonHorse").value;
+  const student = state.db.students.find((s) => s.id === studentId);
+  const horse = state.db.horses.find((h) => h.id === horseId);
+  if (!student || !horse) { showToast("Please make sure a student and horse are both added and selected.", true); return; }
+  const instructor = $("#lessonInstructor").value;
+  const date = $("#lessonDate").value;
+  const time = $("#lessonTime").value;
+  const notes = $("#lessonNotes").value;
+  const endInfo = addOneHourToTime(time, date);
+
+  const submitBtn = e.target.querySelector("button[type=submit]");
+  submitBtn.disabled = true;
+  try {
+    await calendarCreateEvent({
+      summary: `${student.name} Lesson — ${horse.name}`,
+      description: notes,
+      start: { dateTime: `${date}T${time}:00`, timeZone: CONFIG.TIMEZONE },
+      end: { dateTime: `${endInfo.date}T${endInfo.time}:00`, timeZone: CONFIG.TIMEZONE },
+      extendedProperties: { private: { type: "lesson", studentId: student.id, studentName: student.name, horseId: horse.id, horseName: horse.name, instructor } },
+    });
+    closeModal("lessonModal");
+    showToast("Lesson added to Google Calendar");
+    state.scheduleDate = date;
+    renderSchedule();
+  } catch (err) {
+    showToast("Couldn't add lesson: " + err.message, true);
   } finally {
     submitBtn.disabled = false;
   }
@@ -529,20 +799,22 @@ function renderHorses() {
   }
 
   horses.forEach((h) => {
+    const programLine = h.programDaysPerWeek ? `${h.programDaysPerWeek}x/week` + (h.programNotes ? " · " + h.programNotes : "") : (h.programNotes || "");
     const card = el(
       "div",
       { class: "horse-card" + (h.active ? "" : " inactive"), onclick: () => navigate("horse-profile", h.id) },
-      el("h3", {}, h.name),
+      el("div", { class: "horse-card-top" }, avatarEl(h), el("h3", {}, h.name)),
       el("span", { class: "badge" + (h.active ? "" : " inactive") }, h.active ? "Active" : "Inactive"),
-      el("p", { class: "muted small" }, [h.breed, h.age ? h.age + " yrs" : ""].filter(Boolean).join(" · ") || " ")
+      el("p", { class: "muted small" }, [h.breed, h.age ? h.age + " yrs" : ""].filter(Boolean).join(" · ") || " "),
+      programLine ? el("p", { class: "muted small" }, "Program: " + programLine) : null
     );
     grid.appendChild(card);
   });
 }
 
-document.querySelectorAll(".filter-btn").forEach((btn) => {
+document.querySelectorAll(".horse-filter-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".filter-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".horse-filter-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     state.horseFilter = btn.dataset.filter;
     renderHorses();
@@ -558,8 +830,20 @@ function openHorseModal(horse) {
   $("#horseAge").value = horse ? horse.age || "" : "";
   $("#horseOwnerName").value = horse ? horse.ownerName || "" : "";
   $("#horseOwnerEmail").value = horse ? horse.ownerEmail || "" : "";
+  $("#horseProgramDays").value = horse && horse.programDaysPerWeek != null ? horse.programDaysPerWeek : "";
+  $("#horseProgramNotes").value = horse ? horse.programNotes || "" : "";
   $("#horseNotes").value = horse ? horse.notes || "" : "";
   $("#horseActive").checked = horse ? !!horse.active : true;
+  $("#horsePhoto").value = "";
+
+  const previewWrap = $("#horsePhotoPreviewWrap");
+  if (horse && horse.photo && horse.photo.thumbnailLink) {
+    $("#horsePhotoPreview").src = horse.photo.thumbnailLink;
+    previewWrap.hidden = false;
+  } else {
+    previewWrap.hidden = true;
+  }
+
   openModal("horseModal");
 }
 
@@ -569,20 +853,41 @@ $("#horseForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = $("#horseId").value || uuid();
   const isNew = !$("#horseId").value;
-  const horseData = {
-    id,
-    name: $("#horseName").value.trim(),
-    breed: $("#horseBreed").value.trim(),
-    age: $("#horseAge").value.trim(),
-    ownerName: $("#horseOwnerName").value.trim(),
-    ownerEmail: $("#horseOwnerEmail").value.trim(),
-    notes: $("#horseNotes").value.trim(),
-    active: $("#horseActive").checked,
-    createdAt: isNew ? new Date().toISOString() : undefined,
-  };
   const submitBtn = e.target.querySelector("button[type=submit]");
   submitBtn.disabled = true;
   try {
+    let photo = null;
+    if (!isNew) {
+      const existing = state.db.horses.find((h) => h.id === id);
+      photo = existing ? existing.photo || null : null;
+    }
+    const photoFile = $("#horsePhoto").files[0];
+    if (photoFile) {
+      submitBtn.textContent = "Uploading photo…";
+      const uploaded = await driveUploadMedia(photoFile, state.profilesFolderId);
+      photo = {
+        fileId: uploaded.id,
+        mimeType: uploaded.mimeType,
+        webViewLink: uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+        thumbnailLink: uploaded.thumbnailLink || "",
+      };
+    }
+
+    const horseData = {
+      id,
+      name: $("#horseName").value.trim(),
+      breed: $("#horseBreed").value.trim(),
+      age: $("#horseAge").value.trim(),
+      ownerName: $("#horseOwnerName").value.trim(),
+      ownerEmail: $("#horseOwnerEmail").value.trim(),
+      programDaysPerWeek: $("#horseProgramDays").value ? Number($("#horseProgramDays").value) : null,
+      programNotes: $("#horseProgramNotes").value.trim(),
+      notes: $("#horseNotes").value.trim(),
+      active: $("#horseActive").checked,
+      photo,
+      createdAt: isNew ? new Date().toISOString() : undefined,
+    };
+
     if (isNew) {
       state.db.horses.push(horseData);
     } else {
@@ -600,6 +905,7 @@ $("#horseForm").addEventListener("submit", async (e) => {
     showToast("Couldn't save horse: " + err.message, true);
   } finally {
     submitBtn.disabled = false;
+    submitBtn.textContent = "Save Horse";
   }
 });
 
@@ -616,14 +922,26 @@ function renderHorseProfile(horseId) {
     return;
   }
   header.innerHTML = "";
-  header.appendChild(el("h1", {}, horse.name));
-  header.appendChild(el("span", { class: "badge" + (horse.active ? "" : " inactive") }, horse.active ? "Active in program" : "Inactive"));
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-title-row" },
+      avatarEl(horse, "large"),
+      el(
+        "div",
+        {},
+        el("h1", {}, horse.name),
+        el("span", { class: "badge" + (horse.active ? "" : " inactive") }, horse.active ? "Active in program" : "Inactive")
+      )
+    )
+  );
   header.appendChild(
     el(
       "div",
       { class: "profile-meta" },
       horse.breed ? el("span", {}, "Breed: " + escapeHtml(horse.breed)) : null,
       horse.age ? el("span", {}, "Age: " + escapeHtml(horse.age)) : null,
+      horse.programDaysPerWeek ? el("span", {}, "Program: " + horse.programDaysPerWeek + "x/week" + (horse.programNotes ? " (" + escapeHtml(horse.programNotes) + ")" : "")) : null,
       horse.ownerName ? el("span", {}, "Owner: " + escapeHtml(horse.ownerName)) : null,
       horse.ownerEmail ? el("span", {}, escapeHtml(horse.ownerEmail)) : null
     )
@@ -637,15 +955,13 @@ function renderHorseProfile(horseId) {
       el("button", { class: "btn btn-ghost small", onclick: () => openHorseModal(horse) }, "Edit Info"),
       el(
         "button",
-        {
-          class: "btn btn-ghost small",
-          onclick: () => toggleHorseActive(horse),
-        },
+        { class: "btn btn-ghost small", onclick: () => toggleHorseActive(horse) },
         horse.active ? "Mark Inactive" : "Mark Active"
       )
     )
   );
 
+  renderWeekStrip("#horseWeekSchedule", "horseId", horseId);
   renderReportCards(horseId);
 }
 
@@ -706,10 +1022,7 @@ function renderReportCards(horseId) {
       actions.appendChild(
         el(
           "button",
-          {
-            class: "btn btn-ghost small",
-            onclick: () => emailReportCardToOwner(horse, c),
-          },
+          { class: "btn btn-ghost small", onclick: () => emailReportCardToOwner(horse, c) },
           "Email to Owner"
         )
       );
@@ -801,6 +1114,339 @@ $("#reportCardForm").addEventListener("submit", async (e) => {
 });
 
 /* =========================================================
+   STUDENTS VIEW
+   ========================================================= */
+function renderStudents() {
+  const grid = $("#studentsGrid");
+  grid.innerHTML = "";
+  let students = state.db.students.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (state.studentFilter === "active") students = students.filter((s) => s.active);
+  else if (state.studentFilter === "inactive") students = students.filter((s) => !s.active);
+
+  if (!students.length) {
+    grid.appendChild(el("p", { class: "empty-note" }, "No students to show yet."));
+    return;
+  }
+
+  students.forEach((s) => {
+    const programLine = s.programDaysPerWeek ? `${s.programDaysPerWeek}x/week` + (s.programNotes ? " · " + s.programNotes : "") : (s.programNotes || "");
+    const card = el(
+      "div",
+      { class: "horse-card" + (s.active ? "" : " inactive"), onclick: () => navigate("student-profile", s.id) },
+      el("div", { class: "horse-card-top" }, avatarEl(s), el("h3", {}, s.name)),
+      el("span", { class: "badge" + (s.active ? "" : " inactive") }, s.active ? "Active" : "Inactive"),
+      el("p", { class: "muted small" }, s.contactPhone || s.contactEmail || " "),
+      programLine ? el("p", { class: "muted small" }, "Program: " + programLine) : null
+    );
+    grid.appendChild(card);
+  });
+}
+
+document.querySelectorAll(".student-filter-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".student-filter-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    state.studentFilter = btn.dataset.filter;
+    renderStudents();
+  });
+});
+
+/* ---- Add / Edit Student modal ---- */
+function openStudentModal(student) {
+  $("#studentModalTitle").textContent = student ? "Edit Student" : "Add Student";
+  $("#studentId").value = student ? student.id : "";
+  $("#studentName").value = student ? student.name : "";
+  $("#studentPhone").value = student ? student.contactPhone || "" : "";
+  $("#studentEmail").value = student ? student.contactEmail || "" : "";
+  $("#studentGuardian").value = student ? student.guardianName || "" : "";
+  $("#studentProgramDays").value = student && student.programDaysPerWeek != null ? student.programDaysPerWeek : "";
+  $("#studentProgramNotes").value = student ? student.programNotes || "" : "";
+  $("#studentNotes").value = student ? student.notes || "" : "";
+  $("#studentActive").checked = student ? !!student.active : true;
+  $("#studentPhoto").value = "";
+
+  const previewWrap = $("#studentPhotoPreviewWrap");
+  if (student && student.photo && student.photo.thumbnailLink) {
+    $("#studentPhotoPreview").src = student.photo.thumbnailLink;
+    previewWrap.hidden = false;
+  } else {
+    previewWrap.hidden = true;
+  }
+
+  openModal("studentModal");
+}
+
+$("#addStudentBtn").addEventListener("click", () => openStudentModal(null));
+
+$("#studentForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = $("#studentId").value || uuid();
+  const isNew = !$("#studentId").value;
+  const submitBtn = e.target.querySelector("button[type=submit]");
+  submitBtn.disabled = true;
+  try {
+    let photo = null;
+    if (!isNew) {
+      const existing = state.db.students.find((s) => s.id === id);
+      photo = existing ? existing.photo || null : null;
+    }
+    const photoFile = $("#studentPhoto").files[0];
+    if (photoFile) {
+      submitBtn.textContent = "Uploading photo…";
+      const uploaded = await driveUploadMedia(photoFile, state.profilesFolderId);
+      photo = {
+        fileId: uploaded.id,
+        mimeType: uploaded.mimeType,
+        webViewLink: uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+        thumbnailLink: uploaded.thumbnailLink || "",
+      };
+    }
+
+    const studentData = {
+      id,
+      name: $("#studentName").value.trim(),
+      contactPhone: $("#studentPhone").value.trim(),
+      contactEmail: $("#studentEmail").value.trim(),
+      guardianName: $("#studentGuardian").value.trim(),
+      programDaysPerWeek: $("#studentProgramDays").value ? Number($("#studentProgramDays").value) : null,
+      programNotes: $("#studentProgramNotes").value.trim(),
+      notes: $("#studentNotes").value.trim(),
+      active: $("#studentActive").checked,
+      photo,
+      createdAt: isNew ? new Date().toISOString() : undefined,
+    };
+
+    if (isNew) {
+      state.db.students.push(studentData);
+    } else {
+      const idx = state.db.students.findIndex((s) => s.id === id);
+      state.db.students[idx] = Object.assign({}, state.db.students[idx], studentData, {
+        createdAt: state.db.students[idx].createdAt,
+      });
+    }
+    await saveDb();
+    closeModal("studentModal");
+    showToast(isNew ? "Student added" : "Student updated");
+    if (state.currentView === "student-profile") renderStudentProfile(id);
+    else renderStudents();
+  } catch (err) {
+    showToast("Couldn't save student: " + err.message, true);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Save Student";
+  }
+});
+
+/* =========================================================
+   STUDENT PROFILE VIEW
+   ========================================================= */
+$("#backToStudentsBtn").addEventListener("click", () => navigate("students"));
+
+function renderStudentProfile(studentId) {
+  const student = state.db.students.find((s) => s.id === studentId);
+  const header = $("#studentProfileHeader");
+  if (!student) {
+    header.innerHTML = "<p>Student not found.</p>";
+    return;
+  }
+  header.innerHTML = "";
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-title-row" },
+      avatarEl(student, "large"),
+      el(
+        "div",
+        {},
+        el("h1", {}, student.name),
+        el("span", { class: "badge" + (student.active ? "" : " inactive") }, student.active ? "Active student" : "Inactive")
+      )
+    )
+  );
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-meta" },
+      student.contactPhone ? el("span", {}, "Phone: " + escapeHtml(student.contactPhone)) : null,
+      student.contactEmail ? el("span", {}, escapeHtml(student.contactEmail)) : null,
+      student.guardianName ? el("span", {}, "Guardian: " + escapeHtml(student.guardianName)) : null,
+      student.programDaysPerWeek ? el("span", {}, "Program: " + student.programDaysPerWeek + "x/week" + (student.programNotes ? " (" + escapeHtml(student.programNotes) + ")" : "")) : null
+    )
+  );
+  if (student.notes) header.appendChild(el("p", { class: "muted" }, student.notes));
+
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-actions" },
+      el("button", { class: "btn btn-ghost small", onclick: () => openStudentModal(student) }, "Edit Info"),
+      el(
+        "button",
+        { class: "btn btn-ghost small", onclick: () => toggleStudentActive(student) },
+        student.active ? "Mark Inactive" : "Mark Active"
+      )
+    )
+  );
+
+  renderWeekStrip("#studentWeekSchedule", "studentId", studentId);
+  renderLessonLogs(studentId);
+}
+
+async function toggleStudentActive(student) {
+  student.active = !student.active;
+  try {
+    await saveDb();
+    showToast(student.active ? "Marked active" : "Marked inactive");
+    renderStudentProfile(student.id);
+  } catch (err) {
+    student.active = !student.active;
+    showToast("Couldn't update: " + err.message, true);
+  }
+}
+
+function renderLessonLogs(studentId) {
+  const list = $("#lessonLogList");
+  list.innerHTML = "";
+  const logs = state.db.lessonLogs
+    .filter((l) => l.studentId === studentId)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  if (!logs.length) {
+    list.appendChild(el("p", { class: "empty-note" }, "No lesson logs yet."));
+    return;
+  }
+
+  logs.forEach((l) => {
+    const student = state.db.students.find((s) => s.id === studentId);
+    const horse = l.horseId ? state.db.horses.find((h) => h.id === l.horseId) : null;
+    const card = el("div", { class: "report-card" });
+    card.appendChild(
+      el(
+        "div",
+        { class: "report-card-head" },
+        el("div", { class: "report-card-date" }, fmtDateHuman(l.date)),
+        el("div", { class: "report-card-rider" }, "Instructor: " + escapeHtml(l.instructor) + (horse ? " · Horse: " + escapeHtml(horse.name) : ""))
+      )
+    );
+    card.appendChild(el("div", { class: "report-card-summary" }, l.summary));
+    if (l.exercises) card.appendChild(el("p", { class: "muted small" }, "Exercises: " + l.exercises));
+
+    if (l.media && l.media.length) {
+      const thumbWrap = el("div", { class: "media-thumbs" });
+      l.media.forEach((m) => {
+        const isImg = (m.mimeType || "").startsWith("image/");
+        thumbWrap.appendChild(
+          el(
+            "a",
+            { class: "media-thumb", href: m.webViewLink, target: "_blank", rel: "noopener" },
+            isImg && m.thumbnailLink ? el("img", { src: m.thumbnailLink }) : document.createTextNode(m.mimeType && m.mimeType.startsWith("video/") ? "🎥 video" : "📎 file")
+          )
+        );
+      });
+      card.appendChild(thumbWrap);
+    }
+
+    const actions = el("div", { class: "profile-actions" });
+    if (student && student.contactEmail) {
+      actions.appendChild(
+        el("button", { class: "btn btn-ghost small", onclick: () => emailLessonLogToFamily(student, l, horse) }, "Email to Family")
+      );
+    }
+    card.appendChild(actions);
+
+    list.appendChild(card);
+  });
+}
+
+function emailLessonLogToFamily(student, log, horse) {
+  const subject = `Lesson Report for ${student.name} — ${fmtDateHuman(log.date)}`;
+  let body = `Hi${student.guardianName ? " " + student.guardianName : ""},\n\nHere's what ${student.name} worked on${horse ? " on " + horse.name : ""}:\n\n${log.summary}\n`;
+  if (log.exercises) body += `\nExercises/notes: ${log.exercises}\n`;
+  body += `\nInstructor: ${log.instructor}\n`;
+  if (log.media && log.media.length) {
+    body += `\nPhotos/Videos:\n` + log.media.map((m) => m.webViewLink).join("\n");
+  }
+  body += `\n\n— RPD Equestrian`;
+  const mailto = `mailto:${encodeURIComponent(student.contactEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  window.location.href = mailto;
+}
+
+/* ---- Add Lesson Log modal ---- */
+function openLessonLogModal(studentId, horseId, defaultDate) {
+  state.currentStudentId = studentId;
+  $("#llDate").value = defaultDate || todayStr();
+  $("#llInstructor").value = "Shariti";
+
+  const horseSelect = $("#llHorse");
+  horseSelect.innerHTML = "";
+  horseSelect.appendChild(el("option", { value: "" }, "— none / not specified —"));
+  state.db.horses.filter((h) => h.active).forEach((h) => horseSelect.appendChild(el("option", { value: h.id }, h.name)));
+  horseSelect.value = horseId || "";
+
+  $("#llSummary").value = "";
+  $("#llExercises").value = "";
+  $("#llMedia").value = "";
+  $("#llUploadStatus").textContent = "";
+  openModal("lessonLogModal");
+}
+
+$("#addLessonLogBtn").addEventListener("click", () => openLessonLogModal(state.currentStudentId, "", todayStr()));
+
+$("#lessonLogForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const studentId = state.currentStudentId;
+  const student = state.db.students.find((s) => s.id === studentId);
+  if (!student) { showToast("No student selected.", true); return; }
+
+  const submitBtn = $("#llSubmitBtn");
+  submitBtn.disabled = true;
+  const statusEl = $("#llUploadStatus");
+
+  try {
+    const files = Array.from($("#llMedia").files || []);
+    const media = [];
+    if (files.length) {
+      const studentMediaFolder = await driveFindOrCreateFolder(`${student.name}-${student.id}-lessons`, state.mediaFolderId);
+      for (let i = 0; i < files.length; i++) {
+        statusEl.textContent = `Uploading ${i + 1} of ${files.length}…`;
+        const uploaded = await driveUploadMedia(files[i], studentMediaFolder.id);
+        media.push({
+          fileId: uploaded.id,
+          name: uploaded.name,
+          mimeType: uploaded.mimeType,
+          webViewLink: uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`,
+          thumbnailLink: uploaded.thumbnailLink || "",
+        });
+      }
+    }
+    statusEl.textContent = "Saving lesson log…";
+
+    const log = {
+      id: uuid(),
+      studentId,
+      horseId: $("#llHorse").value || null,
+      date: $("#llDate").value,
+      instructor: $("#llInstructor").value,
+      summary: $("#llSummary").value.trim(),
+      exercises: $("#llExercises").value.trim(),
+      media,
+      createdAt: new Date().toISOString(),
+    };
+    state.db.lessonLogs.push(log);
+    await saveDb();
+
+    closeModal("lessonLogModal");
+    showToast("Lesson log saved");
+    renderLessonLogs(studentId);
+  } catch (err) {
+    showToast("Couldn't save lesson log: " + err.message, true);
+  } finally {
+    submitBtn.disabled = false;
+    statusEl.textContent = "";
+  }
+});
+
+/* =========================================================
    MODAL HELPERS
    ========================================================= */
 function openModal(id) { $("#" + id).hidden = false; }
@@ -819,7 +1465,6 @@ document.querySelectorAll(".modal-overlay").forEach((overlay) => {
    INIT
    ========================================================= */
 window.addEventListener("load", () => {
-  // Wait for Google Identity Services script to be ready
   const check = setInterval(() => {
     if (window.google && google.accounts && google.accounts.oauth2) {
       clearInterval(check);

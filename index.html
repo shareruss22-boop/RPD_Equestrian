@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>RPD Equestrian</title>
-<link rel="stylesheet" href="styles.css?v=2" />
+<link rel="stylesheet" href="styles.css?v=4" />
 </head>
 <body>
 
@@ -17,6 +17,7 @@
       <nav class="main-nav" id="mainNav" hidden>
         <button class="nav-link" data-route="schedule">Schedule</button>
         <button class="nav-link" data-route="horses">Horses</button>
+        <button class="nav-link" data-route="students">Students</button>
       </nav>
       <div class="topbar-right">
         <span id="userChip" class="user-chip" hidden></span>
@@ -52,9 +53,11 @@
     <section id="scheduleView" class="view" hidden>
       <div class="view-header">
         <h1>Schedule</h1>
-        <button id="addSessionBtn" class="btn btn-primary">+ Add Work Session</button>
+        <div class="header-btn-group">
+          <button id="addSessionBtn" class="btn btn-primary">+ Add Work Session</button>
+          <button id="addLessonBtn" class="btn btn-primary">+ Add Lesson</button>
+        </div>
       </div>
-      <div id="agendaList" class="agenda-list"></div>
 
       <div class="calendar-embed-toggle">
         <button id="toggleEmbedBtn" class="btn btn-ghost small">Show full Google Calendar view ▾</button>
@@ -62,6 +65,17 @@
       <div id="calendarEmbedWrap" class="calendar-embed-wrap" hidden>
         <iframe id="calendarEmbed" src="" style="border:0" width="100%" height="600" frameborder="0" scrolling="no"></iframe>
       </div>
+
+      <div class="day-nav">
+        <button id="prevDayBtn" class="btn btn-ghost small">‹ Prev</button>
+        <div class="day-nav-label">
+          <span id="dayNavLabel"></span>
+          <button id="todayBtn" class="btn btn-ghost small">Today</button>
+        </div>
+        <button id="nextDayBtn" class="btn btn-ghost small">Next ›</button>
+      </div>
+
+      <div id="agendaList" class="agenda-list"></div>
     </section>
 
     <section id="horsesView" class="view" hidden>
@@ -70,9 +84,9 @@
         <button id="addHorseBtn" class="btn btn-primary">+ Add Horse</button>
       </div>
       <div class="filter-row">
-        <button class="filter-btn active" data-filter="active">Active</button>
-        <button class="filter-btn" data-filter="inactive">Inactive</button>
-        <button class="filter-btn" data-filter="all">All</button>
+        <button class="filter-btn horse-filter-btn active" data-filter="active">Active</button>
+        <button class="filter-btn horse-filter-btn" data-filter="inactive">Inactive</button>
+        <button class="filter-btn horse-filter-btn" data-filter="all">All</button>
       </div>
       <div id="horsesGrid" class="horses-grid"></div>
     </section>
@@ -80,11 +94,42 @@
     <section id="horseProfileView" class="view" hidden>
       <button id="backToHorsesBtn" class="btn btn-ghost small">← Back to Horses</button>
       <div id="horseProfileHeader" class="horse-profile-header"></div>
+      <div class="week-schedule-card">
+        <h3>This Week's Schedule</h3>
+        <div id="horseWeekSchedule" class="week-strip"></div>
+      </div>
       <div class="view-header">
         <h2>Report Cards</h2>
         <button id="addReportCardBtn" class="btn btn-primary">+ New Report Card</button>
       </div>
       <div id="reportCardList" class="report-card-list"></div>
+    </section>
+
+    <section id="studentsView" class="view" hidden>
+      <div class="view-header">
+        <h1>Students</h1>
+        <button id="addStudentBtn" class="btn btn-primary">+ Add Student</button>
+      </div>
+      <div class="filter-row">
+        <button class="filter-btn student-filter-btn active" data-filter="active">Active</button>
+        <button class="filter-btn student-filter-btn" data-filter="inactive">Inactive</button>
+        <button class="filter-btn student-filter-btn" data-filter="all">All</button>
+      </div>
+      <div id="studentsGrid" class="horses-grid"></div>
+    </section>
+
+    <section id="studentProfileView" class="view" hidden>
+      <button id="backToStudentsBtn" class="btn btn-ghost small">← Back to Students</button>
+      <div id="studentProfileHeader" class="horse-profile-header"></div>
+      <div class="week-schedule-card">
+        <h3>This Week's Schedule</h3>
+        <div id="studentWeekSchedule" class="week-strip"></div>
+      </div>
+      <div class="view-header">
+        <h2>Lesson Log</h2>
+        <button id="addLessonLogBtn" class="btn btn-primary">+ New Lesson Log</button>
+      </div>
+      <div id="lessonLogList" class="report-card-list"></div>
     </section>
   </main>
 
@@ -98,6 +143,13 @@
       <form id="horseForm" class="modal-body">
         <input type="hidden" id="horseId" />
         <label>Name *<input type="text" id="horseName" required /></label>
+        <label>Profile Photo
+          <input type="file" id="horsePhoto" accept="image/*" />
+        </label>
+        <div id="horsePhotoPreviewWrap" class="photo-preview-wrap" hidden>
+          <img id="horsePhotoPreview" class="photo-preview" alt="Current photo" />
+          <span class="muted small">Current photo (choose a new file to replace)</span>
+        </div>
         <div class="form-row">
           <label>Breed<input type="text" id="horseBreed" /></label>
           <label>Age<input type="text" id="horseAge" /></label>
@@ -105,6 +157,10 @@
         <div class="form-row">
           <label>Owner name<input type="text" id="horseOwnerName" /></label>
           <label>Owner email<input type="email" id="horseOwnerEmail" /></label>
+        </div>
+        <div class="form-row">
+          <label>Program (days/week)<input type="number" id="horseProgramDays" min="0" max="7" step="1" placeholder="e.g. 4" /></label>
+          <label>Program notes<input type="text" id="horseProgramNotes" placeholder="e.g. Mon/Wed/Fri" /></label>
         </div>
         <label>Notes<textarea id="horseNotes" rows="3"></textarea></label>
         <label class="checkbox-label"><input type="checkbox" id="horseActive" checked /> Active in program</label>
@@ -177,9 +233,112 @@
     </div>
   </div>
 
+  <!-- Add / Edit Student Modal -->
+  <div id="studentModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="studentModalTitle">Add Student</h2>
+        <button class="modal-close" data-close="studentModal">&times;</button>
+      </div>
+      <form id="studentForm" class="modal-body">
+        <input type="hidden" id="studentId" />
+        <label>Name *<input type="text" id="studentName" required /></label>
+        <label>Profile Photo
+          <input type="file" id="studentPhoto" accept="image/*" />
+        </label>
+        <div id="studentPhotoPreviewWrap" class="photo-preview-wrap" hidden>
+          <img id="studentPhotoPreview" class="photo-preview" alt="Current photo" />
+          <span class="muted small">Current photo (choose a new file to replace)</span>
+        </div>
+        <div class="form-row">
+          <label>Contact phone<input type="text" id="studentPhone" /></label>
+          <label>Contact email<input type="email" id="studentEmail" /></label>
+        </div>
+        <label>Guardian name (if minor)<input type="text" id="studentGuardian" /></label>
+        <div class="form-row">
+          <label>Program (days/week)<input type="number" id="studentProgramDays" min="0" max="7" step="1" placeholder="e.g. 1" /></label>
+          <label>Program notes<input type="text" id="studentProgramNotes" placeholder="e.g. Saturdays" /></label>
+        </div>
+        <label>Notes<textarea id="studentNotes" rows="3"></textarea></label>
+        <label class="checkbox-label"><input type="checkbox" id="studentActive" checked /> Active student</label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="studentModal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Student</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add Lesson Modal (calendar) -->
+  <div id="lessonModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Add Lesson</h2>
+        <button class="modal-close" data-close="lessonModal">&times;</button>
+      </div>
+      <form id="lessonForm" class="modal-body">
+        <label>Student *
+          <select id="lessonStudent" required></select>
+        </label>
+        <label>Horse *
+          <select id="lessonHorse" required></select>
+        </label>
+        <label>Instructor *
+          <select id="lessonInstructor" required>
+            <option value="Shariti">Shariti</option>
+            <option value="Laken">Laken</option>
+            <option value="Both">Both</option>
+          </select>
+        </label>
+        <div class="form-row">
+          <label>Date *<input type="date" id="lessonDate" required /></label>
+          <label>Time *<input type="time" id="lessonTime" required /></label>
+        </div>
+        <label>Notes<textarea id="lessonNotes" rows="2"></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="lessonModal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add to Schedule</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Lesson Log Modal -->
+  <div id="lessonLogModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>New Lesson Log</h2>
+        <button class="modal-close" data-close="lessonLogModal">&times;</button>
+      </div>
+      <form id="lessonLogForm" class="modal-body">
+        <div class="form-row">
+          <label>Date *<input type="date" id="llDate" required /></label>
+          <label>Instructor *
+            <select id="llInstructor" required>
+              <option value="Shariti">Shariti</option>
+              <option value="Laken">Laken</option>
+              <option value="Both">Both</option>
+            </select>
+          </label>
+        </div>
+        <label>Horse ridden
+          <select id="llHorse"><option value="">— none / not specified —</option></select>
+        </label>
+        <label>What was worked on *<textarea id="llSummary" rows="3" required placeholder="e.g. Sitting trot, posting diagonals..."></textarea></label>
+        <label>Exercises / notes<textarea id="llExercises" rows="2"></textarea></label>
+        <label>Photos / Videos<input type="file" id="llMedia" accept="image/*,video/*" multiple /></label>
+        <div id="llUploadStatus" class="muted small"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="lessonLogModal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="llSubmitBtn">Save Lesson Log</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
