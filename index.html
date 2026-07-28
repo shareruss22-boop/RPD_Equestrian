@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RPD Equestrian</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">🐴</span>
+        <span class="brand-name">RPD Equestrian</span>
+      </div>
+      <nav class="main-nav" id="mainNav" hidden>
+        <button class="nav-link" data-route="schedule">Schedule</button>
+        <button class="nav-link" data-route="horses">Horses</button>
+      </nav>
+      <div class="topbar-right">
+        <span id="userChip" class="user-chip" hidden></span>
+        <button id="signInBtn" class="btn btn-light">Sign in with Google</button>
+        <button id="signOutBtn" class="btn btn-ghost" hidden>Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app">
+    <section id="signedOutView" class="landing">
+      <div class="landing-card">
+        <h1>Welcome to RPD Equestrian</h1>
+        <p>Sign in with Google to see the schedule, log report cards, and manage the horses.</p>
+        <button id="signInBtn2" class="btn btn-primary btn-lg">Sign in with Google</button>
+        <p class="muted small">You must be signed in with an account added as a test user on the project (Shariti or Laken's Google account).</p>
+      </div>
+    </section>
+
+    <section id="loadingView" class="loading-view" hidden>
+      <div class="spinner"></div>
+      <p id="loadingText">Loading…</p>
+    </section>
+
+    <section id="errorView" class="error-view" hidden>
+      <div class="error-card">
+        <h2>Something went wrong</h2>
+        <p id="errorText"></p>
+        <button id="errorRetryBtn" class="btn btn-primary">Try again</button>
+      </div>
+    </section>
+
+    <section id="scheduleView" class="view" hidden>
+      <div class="view-header">
+        <h1>Schedule</h1>
+        <button id="addSessionBtn" class="btn btn-primary">+ Add Work Session</button>
+      </div>
+      <div id="agendaList" class="agenda-list"></div>
+
+      <div class="calendar-embed-toggle">
+        <button id="toggleEmbedBtn" class="btn btn-ghost small">Show full Google Calendar view ▾</button>
+      </div>
+      <div id="calendarEmbedWrap" class="calendar-embed-wrap" hidden>
+        <iframe id="calendarEmbed" src="" style="border:0" width="100%" height="600" frameborder="0" scrolling="no"></iframe>
+      </div>
+    </section>
+
+    <section id="horsesView" class="view" hidden>
+      <div class="view-header">
+        <h1>Horses</h1>
+        <button id="addHorseBtn" class="btn btn-primary">+ Add Horse</button>
+      </div>
+      <div class="filter-row">
+        <button class="filter-btn active" data-filter="active">Active</button>
+        <button class="filter-btn" data-filter="inactive">Inactive</button>
+        <button class="filter-btn" data-filter="all">All</button>
+      </div>
+      <div id="horsesGrid" class="horses-grid"></div>
+    </section>
+
+    <section id="horseProfileView" class="view" hidden>
+      <button id="backToHorsesBtn" class="btn btn-ghost small">← Back to Horses</button>
+      <div id="horseProfileHeader" class="horse-profile-header"></div>
+      <div class="view-header">
+        <h2>Report Cards</h2>
+        <button id="addReportCardBtn" class="btn btn-primary">+ New Report Card</button>
+      </div>
+      <div id="reportCardList" class="report-card-list"></div>
+    </section>
+  </main>
+
+  <!-- Add / Edit Horse Modal -->
+  <div id="horseModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="horseModalTitle">Add Horse</h2>
+        <button class="modal-close" data-close="horseModal">&times;</button>
+      </div>
+      <form id="horseForm" class="modal-body">
+        <input type="hidden" id="horseId" />
+        <label>Name *<input type="text" id="horseName" required /></label>
+        <div class="form-row">
+          <label>Breed<input type="text" id="horseBreed" /></label>
+          <label>Age<input type="text" id="horseAge" /></label>
+        </div>
+        <div class="form-row">
+          <label>Owner name<input type="text" id="horseOwnerName" /></label>
+          <label>Owner email<input type="email" id="horseOwnerEmail" /></label>
+        </div>
+        <label>Notes<textarea id="horseNotes" rows="3"></textarea></label>
+        <label class="checkbox-label"><input type="checkbox" id="horseActive" checked /> Active in program</label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="horseModal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Horse</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add Work Session Modal -->
+  <div id="sessionModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Add Work Session</h2>
+        <button class="modal-close" data-close="sessionModal">&times;</button>
+      </div>
+      <form id="sessionForm" class="modal-body">
+        <label>Horse *
+          <select id="sessionHorse" required></select>
+        </label>
+        <label>Rider *
+          <select id="sessionRider" required>
+            <option value="Shariti">Shariti</option>
+            <option value="Laken">Laken</option>
+            <option value="Both">Both</option>
+          </select>
+        </label>
+        <div class="form-row">
+          <label>Date *<input type="date" id="sessionDate" required /></label>
+          <label>Time *<input type="time" id="sessionTime" required /></label>
+        </div>
+        <label>Notes<textarea id="sessionNotes" rows="2"></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="sessionModal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add to Schedule</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Report Card Modal -->
+  <div id="reportCardModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>New Report Card</h2>
+        <button class="modal-close" data-close="reportCardModal">&times;</button>
+      </div>
+      <form id="reportCardForm" class="modal-body">
+        <div class="form-row">
+          <label>Date *<input type="date" id="rcDate" required /></label>
+          <label>Rider *
+            <select id="rcRider" required>
+              <option value="Shariti">Shariti</option>
+              <option value="Laken">Laken</option>
+              <option value="Both">Both</option>
+            </select>
+          </label>
+        </div>
+        <label>What was worked on *<textarea id="rcSummary" rows="3" required placeholder="e.g. Flatwork, lead changes, ground poles..."></textarea></label>
+        <label>Exercises / notes<textarea id="rcExercises" rows="2"></textarea></label>
+        <label>Photos / Videos<input type="file" id="rcMedia" accept="image/*,video/*" multiple /></label>
+        <div id="rcUploadStatus" class="muted small"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="reportCardModal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="rcSubmitBtn">Save Report Card</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="app.js"></script>
+</body>
+</html>
