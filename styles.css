@@ -200,15 +200,11 @@ button, input, select, textarea {
 }
 .agenda-row {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--green-100);
-}
-.agenda-top-line {
-  display: flex;
   align-items: center;
   gap: 14px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--green-100);
+  flex-wrap: wrap;
 }
 .agenda-checkbox {
   width: 22px;
@@ -237,13 +233,13 @@ button, input, select, textarea {
   font-weight: 700;
   color: var(--green-700);
 }
-.agenda-info { flex: 1; min-width: 100px; }
+.agenda-info { flex: 1; min-width: 140px; }
 .agenda-horse { font-weight: 700; }
 .agenda-rider { color: var(--text-muted); font-size: 0.9rem; }
-.agenda-trash { margin-left: auto; flex-shrink: 0; }
-.agenda-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.agenda-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: nowrap; }
 @media (max-width: 600px) {
-  .agenda-row { gap: 8px; padding: 10px 12px; }
+  .agenda-row { gap: 10px; padding: 10px 12px; }
+  .agenda-actions { margin-left: 0; }
 }
 .empty-note { padding: 24px; text-align: center; color: var(--text-muted); }
 
