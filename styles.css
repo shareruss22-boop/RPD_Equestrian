@@ -97,6 +97,19 @@ button, input, select, textarea {
 .btn.small { padding: 6px 12px; font-size: 0.85rem; }
 .btn-lg { padding: 12px 24px; font-size: 1.05rem; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.btn-icon.danger { border-color: var(--danger); color: var(--danger); }
+.btn-icon.danger:hover { background: #fdecea; }
 
 /* ---------- Landing ---------- */
 .landing {
@@ -222,7 +235,7 @@ button, input, select, textarea {
 .agenda-info { flex: 1; min-width: 180px; }
 .agenda-horse { font-weight: 700; }
 .agenda-rider { color: var(--text-muted); font-size: 0.9rem; }
-.agenda-actions { display: flex; gap: 8px; }
+.agenda-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .empty-note { padding: 24px; text-align: center; color: var(--text-muted); }
 
 .calendar-embed-toggle { margin: 0 0 14px; }

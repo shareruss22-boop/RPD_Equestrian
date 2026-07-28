@@ -653,8 +653,8 @@ function renderDayAgenda(events) {
               else showToast("This lesson isn't linked to a student profile.", true);
             },
           }, "Log Lesson"),
-          el("button", { class: "btn btn-ghost small", onclick: () => openLessonModal(evt) }, "Edit"),
-          el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
+          el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openLessonModal(evt) }, "✏️"),
+          el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         )
       );
     } else {
@@ -690,8 +690,8 @@ function renderDayAgenda(events) {
               else showToast("This session isn't linked to a horse profile.", true);
             },
           }, "Log Report Card"),
-          el("button", { class: "btn btn-ghost small", onclick: () => openSessionModal(evt) }, "Edit"),
-          el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
+          el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openSessionModal(evt) }, "✏️"),
+          el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         )
       );
     }
