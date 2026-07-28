@@ -645,14 +645,15 @@ function renderDayAgenda(events) {
         el(
           "div",
           { class: "agenda-actions" },
-          evt.htmlLink ? el("a", { class: "agenda-cal-link", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
+          evt.htmlLink ? el("a", { class: "btn btn-ghost btn-icon", title: "Open in Google Calendar", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "🗓️") : null,
           el("button", {
-            class: "btn btn-ghost small",
+            class: "btn btn-ghost btn-icon",
+            title: "Log Lesson",
             onclick: () => {
               if (student) openLessonLogModal(student.id, horse ? horse.id : "", state.scheduleDate);
               else showToast("This lesson isn't linked to a student profile.", true);
             },
-          }, "Log Lesson"),
+          }, "📝"),
           el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openLessonModal(evt) }, "✏️"),
           el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         )
@@ -682,14 +683,15 @@ function renderDayAgenda(events) {
         el(
           "div",
           { class: "agenda-actions" },
-          evt.htmlLink ? el("a", { class: "agenda-cal-link", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "Google Calendar ↗") : null,
+          evt.htmlLink ? el("a", { class: "btn btn-ghost btn-icon", title: "Open in Google Calendar", href: evt.htmlLink, target: "_blank", rel: "noopener" }, "🗓️") : null,
           el("button", {
-            class: "btn btn-ghost small",
+            class: "btn btn-ghost btn-icon",
+            title: "Log Report Card",
             onclick: () => {
               if (horse) openReportCardModal(horse.id, state.scheduleDate);
               else showToast("This session isn't linked to a horse profile.", true);
             },
-          }, "Log Report Card"),
+          }, "📝"),
           el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openSessionModal(evt) }, "✏️"),
           el("button", { class: "btn btn-ghost btn-icon danger", title: "Remove from schedule", onclick: () => deleteSession(evt.id) }, "🗑️")
         )
