@@ -159,6 +159,9 @@
           <label>Owner email<input type="email" id="horseOwnerEmail" /></label>
         </div>
         <div class="form-row">
+          <label>Owner phone (for texting report cards)<input type="tel" id="horseOwnerPhone" placeholder="e.g. 555-123-4567" /></label>
+        </div>
+        <div class="form-row">
           <label>Program (days/week)<input type="number" id="horseProgramDays" min="0" max="7" step="1" placeholder="e.g. 4" /></label>
           <label>Program notes<input type="text" id="horseProgramNotes" placeholder="e.g. Mon/Wed/Fri" /></label>
         </div>
@@ -207,7 +210,7 @@
   <div id="reportCardModal" class="modal-overlay" hidden>
     <div class="modal">
       <div class="modal-header">
-        <h2>New Report Card</h2>
+        <h2 id="reportCardModalTitle">New Report Card</h2>
         <button class="modal-close" data-close="reportCardModal">&times;</button>
       </div>
       <form id="reportCardForm" class="modal-body">
@@ -305,7 +308,7 @@
   <div id="lessonLogModal" class="modal-overlay" hidden>
     <div class="modal">
       <div class="modal-header">
-        <h2>New Lesson Log</h2>
+        <h2 id="lessonLogModalTitle">New Lesson Log</h2>
         <button class="modal-close" data-close="lessonLogModal">&times;</button>
       </div>
       <form id="lessonLogForm" class="modal-body">
@@ -335,6 +338,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

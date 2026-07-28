@@ -31,6 +31,8 @@ const state = {
   currentView: "schedule",
   currentHorseId: null,
   currentStudentId: null,
+  editingReportCardId: null,
+  editingLessonLogId: null,
   horseFilter: "active",
   studentFilter: "active",
   scheduleDate: null, // set once utils are defined
@@ -876,6 +878,7 @@ function openHorseModal(horse) {
   $("#horseAge").value = horse ? horse.age || "" : "";
   $("#horseOwnerName").value = horse ? horse.ownerName || "" : "";
   $("#horseOwnerEmail").value = horse ? horse.ownerEmail || "" : "";
+  $("#horseOwnerPhone").value = horse ? horse.ownerPhone || "" : "";
   $("#horseProgramDays").value = horse && horse.programDaysPerWeek != null ? horse.programDaysPerWeek : "";
   $("#horseProgramNotes").value = horse ? horse.programNotes || "" : "";
   $("#horseNotes").value = horse ? horse.notes || "" : "";
@@ -926,6 +929,7 @@ $("#horseForm").addEventListener("submit", async (e) => {
       age: $("#horseAge").value.trim(),
       ownerName: $("#horseOwnerName").value.trim(),
       ownerEmail: $("#horseOwnerEmail").value.trim(),
+      ownerPhone: $("#horseOwnerPhone").value.trim(),
       programDaysPerWeek: $("#horseProgramDays").value ? Number($("#horseProgramDays").value) : null,
       programNotes: $("#horseProgramNotes").value.trim(),
       notes: $("#horseNotes").value.trim(),
@@ -989,7 +993,8 @@ function renderHorseProfile(horseId) {
       horse.age ? el("span", {}, "Age: " + escapeHtml(horse.age)) : null,
       horse.programDaysPerWeek ? el("span", {}, "Program: " + horse.programDaysPerWeek + "x/week" + (horse.programNotes ? " (" + escapeHtml(horse.programNotes) + ")" : "")) : null,
       horse.ownerName ? el("span", {}, "Owner: " + escapeHtml(horse.ownerName)) : null,
-      horse.ownerEmail ? el("span", {}, escapeHtml(horse.ownerEmail)) : null
+      horse.ownerEmail ? el("span", {}, escapeHtml(horse.ownerEmail)) : null,
+      horse.ownerPhone ? el("span", {}, escapeHtml(horse.ownerPhone)) : null
     )
   );
   if (horse.notes) header.appendChild(el("p", { class: "muted" }, horse.notes));
@@ -1097,10 +1102,49 @@ function renderReportCards(horseId) {
         )
       );
     }
+    if (horse && horse.ownerPhone) {
+      actions.appendChild(
+        el(
+          "button",
+          { class: "btn btn-ghost small", onclick: () => textReportCardToOwner(horse, c) },
+          "Text to Owner"
+        )
+      );
+    }
+    actions.appendChild(
+      el("button", { class: "btn btn-ghost small", onclick: () => openReportCardModal(horseId, c.date, c) }, "Edit")
+    );
+    actions.appendChild(
+      el("button", { class: "btn btn-danger small", onclick: () => deleteReportCard(horseId, c.id) }, "Delete")
+    );
     card.appendChild(actions);
 
     list.appendChild(card);
   });
+}
+
+async function deleteReportCard(horseId, cardId) {
+  if (!confirm("Delete this report card? This can't be undone.")) return;
+  const idx = state.db.reportCards.findIndex((c) => c.id === cardId);
+  if (idx === -1) return;
+  const removed = state.db.reportCards[idx];
+  state.db.reportCards.splice(idx, 1);
+  try {
+    await saveDb();
+    showToast("Report card deleted");
+    renderReportCards(horseId);
+  } catch (err) {
+    state.db.reportCards.splice(idx, 0, removed);
+    showToast("Couldn't delete report card: " + err.message, true);
+  }
+}
+
+function textReportCardToOwner(horse, card) {
+  let body = `${horse.name} update (${fmtDateHuman(card.date)}): ${card.summary}`;
+  if (card.exercises) body += ` Exercises: ${card.exercises}`;
+  body += ` — RPD Equestrian`;
+  const phone = horse.ownerPhone.replace(/[^\d+]/g, "");
+  window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
 function emailReportCardToOwner(horse, card) {
@@ -1116,19 +1160,24 @@ function emailReportCardToOwner(horse, card) {
   window.location.href = mailto;
 }
 
-/* ---- Add Report Card modal ---- */
-function openReportCardModal(horseId, defaultDate) {
+/* ---- Add / Edit Report Card modal ---- */
+function openReportCardModal(horseId, defaultDate, editCard) {
   state.currentHorseId = horseId;
-  $("#rcDate").value = defaultDate || todayStr();
-  $("#rcRider").value = "Shariti";
-  $("#rcSummary").value = "";
-  $("#rcExercises").value = "";
+  state.editingReportCardId = editCard ? editCard.id : null;
+  $("#reportCardModalTitle").textContent = editCard ? "Edit Report Card" : "New Report Card";
+  $("#rcSubmitBtn").textContent = editCard ? "Update Report Card" : "Save Report Card";
+  $("#rcDate").value = editCard ? editCard.date : (defaultDate || todayStr());
+  $("#rcRider").value = editCard ? editCard.rider : "Shariti";
+  $("#rcSummary").value = editCard ? editCard.summary : "";
+  $("#rcExercises").value = editCard ? editCard.exercises : "";
   $("#rcMedia").value = "";
-  $("#rcUploadStatus").textContent = "";
+  $("#rcUploadStatus").textContent = editCard && editCard.media && editCard.media.length
+    ? `${editCard.media.length} file(s) already attached — choosing new files will add more.`
+    : "";
   openModal("reportCardModal");
 }
 
-$("#addReportCardBtn").addEventListener("click", () => openReportCardModal(state.currentHorseId, todayStr()));
+$("#addReportCardBtn").addEventListener("click", () => openReportCardModal(state.currentHorseId, todayStr(), null));
 
 $("#reportCardForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1139,10 +1188,12 @@ $("#reportCardForm").addEventListener("submit", async (e) => {
   const submitBtn = $("#rcSubmitBtn");
   submitBtn.disabled = true;
   const statusEl = $("#rcUploadStatus");
+  const editingId = state.editingReportCardId;
+  const existingCard = editingId ? state.db.reportCards.find((c) => c.id === editingId) : null;
 
   try {
     const files = Array.from($("#rcMedia").files || []);
-    const media = [];
+    const media = existingCard && existingCard.media ? existingCard.media.slice() : [];
     if (files.length) {
       const horseMediaFolder = await driveFindOrCreateFolder(`${horse.name}-${horse.id}`, state.mediaFolderId);
       for (let i = 0; i < files.length; i++) {
@@ -1157,23 +1208,27 @@ $("#reportCardForm").addEventListener("submit", async (e) => {
         });
       }
     }
-    statusEl.textContent = "Saving report card…";
+    statusEl.textContent = editingId ? "Updating report card…" : "Saving report card…";
 
-    const card = {
-      id: uuid(),
+    const cardData = {
       horseId,
       date: $("#rcDate").value,
       rider: $("#rcRider").value,
       summary: $("#rcSummary").value.trim(),
       exercises: $("#rcExercises").value.trim(),
       media,
-      createdAt: new Date().toISOString(),
     };
-    state.db.reportCards.push(card);
+
+    if (editingId && existingCard) {
+      Object.assign(existingCard, cardData);
+    } else {
+      state.db.reportCards.push(Object.assign({ id: uuid(), createdAt: new Date().toISOString() }, cardData));
+    }
     await saveDb();
 
     closeModal("reportCardModal");
-    showToast("Report card saved");
+    showToast(editingId ? "Report card updated" : "Report card saved");
+    state.editingReportCardId = null;
     renderReportCards(horseId);
   } catch (err) {
     showToast("Couldn't save report card: " + err.message, true);
@@ -1446,10 +1501,45 @@ function renderLessonLogs(studentId) {
         el("button", { class: "btn btn-ghost small", onclick: () => emailLessonLogToFamily(student, l, horse) }, "Email to Family")
       );
     }
+    if (student && student.contactPhone) {
+      actions.appendChild(
+        el("button", { class: "btn btn-ghost small", onclick: () => textLessonLogToFamily(student, l, horse) }, "Text to Family")
+      );
+    }
+    actions.appendChild(
+      el("button", { class: "btn btn-ghost small", onclick: () => openLessonLogModal(studentId, l.horseId || "", l.date, l) }, "Edit")
+    );
+    actions.appendChild(
+      el("button", { class: "btn btn-danger small", onclick: () => deleteLessonLog(studentId, l.id) }, "Delete")
+    );
     card.appendChild(actions);
 
     list.appendChild(card);
   });
+}
+
+async function deleteLessonLog(studentId, logId) {
+  if (!confirm("Delete this lesson log? This can't be undone.")) return;
+  const idx = state.db.lessonLogs.findIndex((l) => l.id === logId);
+  if (idx === -1) return;
+  const removed = state.db.lessonLogs[idx];
+  state.db.lessonLogs.splice(idx, 1);
+  try {
+    await saveDb();
+    showToast("Lesson log deleted");
+    renderLessonLogs(studentId);
+  } catch (err) {
+    state.db.lessonLogs.splice(idx, 0, removed);
+    showToast("Couldn't delete lesson log: " + err.message, true);
+  }
+}
+
+function textLessonLogToFamily(student, log, horse) {
+  let body = `${student.name} lesson update (${fmtDateHuman(log.date)}): ${log.summary}`;
+  if (log.exercises) body += ` Exercises: ${log.exercises}`;
+  body += ` — RPD Equestrian`;
+  const phone = student.contactPhone.replace(/[^\d+]/g, "");
+  window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
 function emailLessonLogToFamily(student, log, horse) {
@@ -1465,26 +1555,31 @@ function emailLessonLogToFamily(student, log, horse) {
   window.location.href = mailto;
 }
 
-/* ---- Add Lesson Log modal ---- */
-function openLessonLogModal(studentId, horseId, defaultDate) {
+/* ---- Add / Edit Lesson Log modal ---- */
+function openLessonLogModal(studentId, horseId, defaultDate, editLog) {
   state.currentStudentId = studentId;
-  $("#llDate").value = defaultDate || todayStr();
-  $("#llInstructor").value = "Laken";
+  state.editingLessonLogId = editLog ? editLog.id : null;
+  $("#lessonLogModalTitle").textContent = editLog ? "Edit Lesson Log" : "New Lesson Log";
+  $("#llSubmitBtn").textContent = editLog ? "Update Lesson Log" : "Save Lesson Log";
+  $("#llDate").value = editLog ? editLog.date : (defaultDate || todayStr());
+  $("#llInstructor").value = editLog ? editLog.instructor : "Laken";
 
   const horseSelect = $("#llHorse");
   horseSelect.innerHTML = "";
   horseSelect.appendChild(el("option", { value: "" }, "— none / not specified —"));
   state.db.horses.filter((h) => h.active).forEach((h) => horseSelect.appendChild(el("option", { value: h.id }, h.name)));
-  horseSelect.value = horseId || "";
+  horseSelect.value = editLog ? (editLog.horseId || "") : (horseId || "");
 
-  $("#llSummary").value = "";
-  $("#llExercises").value = "";
+  $("#llSummary").value = editLog ? editLog.summary : "";
+  $("#llExercises").value = editLog ? editLog.exercises : "";
   $("#llMedia").value = "";
-  $("#llUploadStatus").textContent = "";
+  $("#llUploadStatus").textContent = editLog && editLog.media && editLog.media.length
+    ? `${editLog.media.length} file(s) already attached — choosing new files will add more.`
+    : "";
   openModal("lessonLogModal");
 }
 
-$("#addLessonLogBtn").addEventListener("click", () => openLessonLogModal(state.currentStudentId, "", todayStr()));
+$("#addLessonLogBtn").addEventListener("click", () => openLessonLogModal(state.currentStudentId, "", todayStr(), null));
 
 $("#lessonLogForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1495,10 +1590,12 @@ $("#lessonLogForm").addEventListener("submit", async (e) => {
   const submitBtn = $("#llSubmitBtn");
   submitBtn.disabled = true;
   const statusEl = $("#llUploadStatus");
+  const editingId = state.editingLessonLogId;
+  const existingLog = editingId ? state.db.lessonLogs.find((l) => l.id === editingId) : null;
 
   try {
     const files = Array.from($("#llMedia").files || []);
-    const media = [];
+    const media = existingLog && existingLog.media ? existingLog.media.slice() : [];
     if (files.length) {
       const studentMediaFolder = await driveFindOrCreateFolder(`${student.name}-${student.id}-lessons`, state.mediaFolderId);
       for (let i = 0; i < files.length; i++) {
@@ -1513,10 +1610,9 @@ $("#lessonLogForm").addEventListener("submit", async (e) => {
         });
       }
     }
-    statusEl.textContent = "Saving lesson log…";
+    statusEl.textContent = editingId ? "Updating lesson log…" : "Saving lesson log…";
 
-    const log = {
-      id: uuid(),
+    const logData = {
       studentId,
       horseId: $("#llHorse").value || null,
       date: $("#llDate").value,
@@ -1524,13 +1620,18 @@ $("#lessonLogForm").addEventListener("submit", async (e) => {
       summary: $("#llSummary").value.trim(),
       exercises: $("#llExercises").value.trim(),
       media,
-      createdAt: new Date().toISOString(),
     };
-    state.db.lessonLogs.push(log);
+
+    if (editingId && existingLog) {
+      Object.assign(existingLog, logData);
+    } else {
+      state.db.lessonLogs.push(Object.assign({ id: uuid(), createdAt: new Date().toISOString() }, logData));
+    }
     await saveDb();
 
     closeModal("lessonLogModal");
-    showToast("Lesson log saved");
+    showToast(editingId ? "Lesson log updated" : "Lesson log saved");
+    state.editingLessonLogId = null;
     renderLessonLogs(studentId);
   } catch (err) {
     showToast("Couldn't save lesson log: " + err.message, true);
