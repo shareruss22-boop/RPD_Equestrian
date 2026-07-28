@@ -21,6 +21,9 @@
 
 * { box-sizing: border-box; }
 
+/* Attribute-based hidden must always win over display:flex utility classes below */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
