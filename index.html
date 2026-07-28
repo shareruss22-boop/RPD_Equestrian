@@ -179,7 +179,7 @@
   <div id="sessionModal" class="modal-overlay" hidden>
     <div class="modal">
       <div class="modal-header">
-        <h2>Add Work Session</h2>
+        <h2 id="sessionModalTitle">Add Work Session</h2>
         <button class="modal-close" data-close="sessionModal">&times;</button>
       </div>
       <form id="sessionForm" class="modal-body">
@@ -200,7 +200,7 @@
         <label>Notes<textarea id="sessionNotes" rows="2"></textarea></label>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost" data-close="sessionModal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Add to Schedule</button>
+          <button type="submit" class="btn btn-primary" id="sessionSubmitBtn">Add to Schedule</button>
         </div>
       </form>
     </div>
@@ -276,7 +276,7 @@
   <div id="lessonModal" class="modal-overlay" hidden>
     <div class="modal">
       <div class="modal-header">
-        <h2>Add Lesson</h2>
+        <h2 id="lessonModalTitle">Add Lesson</h2>
         <button class="modal-close" data-close="lessonModal">&times;</button>
       </div>
       <form id="lessonForm" class="modal-body">
@@ -298,7 +298,7 @@
         <label>Notes<textarea id="lessonNotes" rows="2"></textarea></label>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost" data-close="lessonModal">Cancel</button>
-          <button type="submit" class="btn btn-primary">Add to Schedule</button>
+          <button type="submit" class="btn btn-primary" id="lessonSubmitBtn">Add to Schedule</button>
         </div>
       </form>
     </div>
@@ -338,6 +338,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

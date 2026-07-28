@@ -33,6 +33,8 @@ const state = {
   currentStudentId: null,
   editingReportCardId: null,
   editingLessonLogId: null,
+  editingSessionEventId: null,
+  editingLessonEventId: null,
   horseFilter: "active",
   studentFilter: "active",
   scheduleDate: null, // set once utils are defined
@@ -112,6 +114,15 @@ function fmtDateShort(dateStr) {
 
 function fmtTimeHuman(iso) {
   return new Intl.DateTimeFormat(undefined, { timeZone: CONFIG.TIMEZONE, hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+}
+
+function nyTimeStringFromISO(iso) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CONFIG.TIMEZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(iso));
+  const map = {};
+  parts.forEach((p) => (map[p.type] = p.value));
+  return `${map.hour}:${map.minute}`;
 }
 
 function addDaysToDateStr(dateStr, days) {
@@ -642,6 +653,7 @@ function renderDayAgenda(events) {
               else showToast("This lesson isn't linked to a student profile.", true);
             },
           }, "Log Lesson"),
+          el("button", { class: "btn btn-ghost small", onclick: () => openLessonModal(evt) }, "Edit"),
           el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
         )
       );
@@ -678,6 +690,7 @@ function renderDayAgenda(events) {
               else showToast("This session isn't linked to a horse profile.", true);
             },
           }, "Log Report Card"),
+          el("button", { class: "btn btn-ghost small", onclick: () => openSessionModal(evt) }, "Edit"),
           el("button", { class: "btn btn-ghost small", onclick: () => deleteSession(evt.id) }, "Cancel")
         )
       );
@@ -730,20 +743,44 @@ $("#toggleEmbedBtn").addEventListener("click", () => {
   $("#toggleEmbedBtn").textContent = wrap.hidden ? "Show full Google Calendar view ▾" : "Hide full Google Calendar view ▴";
 });
 
-/* ---- Add Work Session modal ---- */
-$("#addSessionBtn").addEventListener("click", () => {
+/* ---- Add / Edit Work Session modal ---- */
+function openSessionModal(evt) {
+  const props = evt ? (evt.extendedProperties && evt.extendedProperties.private) || {} : {};
+  state.editingSessionEventId = evt ? evt.id : null;
+  state._editingSessionProps = props;
+  $("#sessionModalTitle").textContent = evt ? "Edit Work Session" : "Add Work Session";
+  $("#sessionSubmitBtn").textContent = evt ? "Update Session" : "Add to Schedule";
+
   const activeHorses = state.db.horses.filter((h) => h.active);
   const select = $("#sessionHorse");
   select.innerHTML = "";
-  if (!activeHorses.length) {
+  const horseList = activeHorses.slice();
+  if (evt && props.horseId && !horseList.some((h) => h.id === props.horseId)) {
+    const inactiveHorse = state.db.horses.find((h) => h.id === props.horseId);
+    if (inactiveHorse) horseList.push(inactiveHorse);
+  }
+  if (!horseList.length) {
     select.appendChild(el("option", { value: "" }, "No active horses — add one first"));
   }
-  activeHorses.forEach((h) => select.appendChild(el("option", { value: h.id }, h.name)));
-  $("#sessionDate").value = state.scheduleDate || todayStr();
-  $("#sessionTime").value = "09:00";
-  $("#sessionNotes").value = "";
+  horseList.forEach((h) => select.appendChild(el("option", { value: h.id }, h.name)));
+  if (evt && props.horseId) select.value = props.horseId;
+
+  if (evt) {
+    $("#sessionRider").value = props.rider || "Shariti";
+    const startIso = evt.start.dateTime || evt.start.date + "T12:00:00Z";
+    $("#sessionDate").value = nyDateStringFromISO(startIso);
+    $("#sessionTime").value = evt.start.dateTime ? nyTimeStringFromISO(evt.start.dateTime) : "09:00";
+    $("#sessionNotes").value = evt.description || "";
+  } else {
+    $("#sessionRider").value = "Shariti";
+    $("#sessionDate").value = state.scheduleDate || todayStr();
+    $("#sessionTime").value = "09:00";
+    $("#sessionNotes").value = "";
+  }
   openModal("sessionModal");
-});
+}
+
+$("#addSessionBtn").addEventListener("click", () => openSessionModal(null));
 
 $("#sessionForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -755,47 +792,82 @@ $("#sessionForm").addEventListener("submit", async (e) => {
   const time = $("#sessionTime").value;
   const notes = $("#sessionNotes").value;
   const endInfo = addOneHourToTime(time, date);
+  const editingId = state.editingSessionEventId;
+  const existingProps = editingId && state._editingSessionProps ? state._editingSessionProps : {};
 
   const submitBtn = e.target.querySelector("button[type=submit]");
   submitBtn.disabled = true;
   try {
-    await calendarCreateEvent({
+    const evtBody = {
       summary: `${horse.name} — ${rider}`,
       description: notes,
       start: { dateTime: `${date}T${time}:00`, timeZone: CONFIG.TIMEZONE },
       end: { dateTime: `${endInfo.date}T${endInfo.time}:00`, timeZone: CONFIG.TIMEZONE },
-      extendedProperties: { private: { type: "work", horseId: horse.id, horseName: horse.name, rider } },
-    });
+      extendedProperties: { private: Object.assign({}, existingProps, { type: "work", horseId: horse.id, horseName: horse.name, rider }) },
+    };
+    if (editingId) {
+      await calendarPatchEvent(editingId, evtBody);
+    } else {
+      await calendarCreateEvent(evtBody);
+    }
     closeModal("sessionModal");
-    showToast("Added to Google Calendar");
+    showToast(editingId ? "Session updated" : "Added to Google Calendar");
+    state.editingSessionEventId = null;
     state.scheduleDate = date;
     renderSchedule();
   } catch (err) {
-    showToast("Couldn't add session: " + err.message, true);
+    showToast("Couldn't save session: " + err.message, true);
   } finally {
     submitBtn.disabled = false;
   }
 });
 
-/* ---- Add Lesson modal ---- */
-$("#addLessonBtn").addEventListener("click", () => {
+/* ---- Add / Edit Lesson modal (calendar) ---- */
+function openLessonModal(evt) {
+  const props = evt ? (evt.extendedProperties && evt.extendedProperties.private) || {} : {};
+  state.editingLessonEventId = evt ? evt.id : null;
+  state._editingLessonProps = props;
+  $("#lessonModalTitle").textContent = evt ? "Edit Lesson" : "Add Lesson";
+  $("#lessonSubmitBtn").textContent = evt ? "Update Lesson" : "Add to Schedule";
+
   const activeStudents = state.db.students.filter((s) => s.active);
   const studentSelect = $("#lessonStudent");
   studentSelect.innerHTML = "";
-  if (!activeStudents.length) studentSelect.appendChild(el("option", { value: "" }, "No active students — add one first"));
-  activeStudents.forEach((s) => studentSelect.appendChild(el("option", { value: s.id }, s.name)));
+  const studentList = activeStudents.slice();
+  if (evt && props.studentId && !studentList.some((s) => s.id === props.studentId)) {
+    const inactiveStudent = state.db.students.find((s) => s.id === props.studentId);
+    if (inactiveStudent) studentList.push(inactiveStudent);
+  }
+  if (!studentList.length) studentSelect.appendChild(el("option", { value: "" }, "No active students — add one first"));
+  studentList.forEach((s) => studentSelect.appendChild(el("option", { value: s.id }, s.name)));
+  if (evt && props.studentId) studentSelect.value = props.studentId;
 
   const activeHorses = state.db.horses.filter((h) => h.active);
   const horseSelect = $("#lessonHorse");
   horseSelect.innerHTML = "";
-  if (!activeHorses.length) horseSelect.appendChild(el("option", { value: "" }, "No active horses — add one first"));
-  activeHorses.forEach((h) => horseSelect.appendChild(el("option", { value: h.id }, h.name)));
+  const horseList = activeHorses.slice();
+  if (evt && props.horseId && !horseList.some((h) => h.id === props.horseId)) {
+    const inactiveHorse = state.db.horses.find((h) => h.id === props.horseId);
+    if (inactiveHorse) horseList.push(inactiveHorse);
+  }
+  if (!horseList.length) horseSelect.appendChild(el("option", { value: "" }, "No active horses — add one first"));
+  horseList.forEach((h) => horseSelect.appendChild(el("option", { value: h.id }, h.name)));
+  if (evt && props.horseId) horseSelect.value = props.horseId;
 
-  $("#lessonDate").value = state.scheduleDate || todayStr();
-  $("#lessonTime").value = "09:00";
-  $("#lessonNotes").value = "";
+  if (evt) {
+    const startIso = evt.start.dateTime || evt.start.date + "T12:00:00Z";
+    $("#lessonDate").value = nyDateStringFromISO(startIso);
+    $("#lessonTime").value = evt.start.dateTime ? nyTimeStringFromISO(evt.start.dateTime) : "09:00";
+    $("#lessonNotes").value = evt.description || "";
+  } else {
+    $("#lessonDate").value = state.scheduleDate || todayStr();
+    $("#lessonTime").value = "09:00";
+    $("#lessonNotes").value = "";
+  }
   openModal("lessonModal");
-});
+}
+
+$("#addLessonBtn").addEventListener("click", () => openLessonModal(null));
 
 $("#lessonForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -809,23 +881,31 @@ $("#lessonForm").addEventListener("submit", async (e) => {
   const time = $("#lessonTime").value;
   const notes = $("#lessonNotes").value;
   const endInfo = addOneHourToTime(time, date);
+  const editingId = state.editingLessonEventId;
+  const existingProps = editingId && state._editingLessonProps ? state._editingLessonProps : {};
 
   const submitBtn = e.target.querySelector("button[type=submit]");
   submitBtn.disabled = true;
   try {
-    await calendarCreateEvent({
+    const evtBody = {
       summary: `${student.name} Lesson — ${horse.name}`,
       description: notes,
       start: { dateTime: `${date}T${time}:00`, timeZone: CONFIG.TIMEZONE },
       end: { dateTime: `${endInfo.date}T${endInfo.time}:00`, timeZone: CONFIG.TIMEZONE },
-      extendedProperties: { private: { type: "lesson", studentId: student.id, studentName: student.name, horseId: horse.id, horseName: horse.name, instructor } },
-    });
+      extendedProperties: { private: Object.assign({}, existingProps, { type: "lesson", studentId: student.id, studentName: student.name, horseId: horse.id, horseName: horse.name, instructor }) },
+    };
+    if (editingId) {
+      await calendarPatchEvent(editingId, evtBody);
+    } else {
+      await calendarCreateEvent(evtBody);
+    }
     closeModal("lessonModal");
-    showToast("Lesson added to Google Calendar");
+    showToast(editingId ? "Lesson updated" : "Lesson added to Google Calendar");
+    state.editingLessonEventId = null;
     state.scheduleDate = date;
     renderSchedule();
   } catch (err) {
-    showToast("Couldn't add lesson: " + err.message, true);
+    showToast("Couldn't save lesson: " + err.message, true);
   } finally {
     submitBtn.disabled = false;
   }
