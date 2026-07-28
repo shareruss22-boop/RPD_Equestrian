@@ -192,6 +192,28 @@ button, input, select, textarea {
   border-top: 1px solid var(--green-100);
   flex-wrap: wrap;
 }
+.agenda-checkbox {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--green-600);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.agenda-row.completed {
+  background: var(--green-50);
+}
+.agenda-row.completed .agenda-horse {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+.completed-badge {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--green-700);
+  text-decoration: none;
+}
 .agenda-time {
   min-width: 78px;
   font-weight: 700;

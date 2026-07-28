@@ -412,6 +412,16 @@ async function calendarDeleteEvent(eventId) {
   await apiFetch(url, { method: "DELETE" });
 }
 
+async function calendarPatchEvent(eventId, patchBody) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(CONFIG.CALENDAR_ID)}/events/${eventId}`;
+  const res = await apiFetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patchBody),
+  });
+  return res.json();
+}
+
 /* =========================================================
    BOOTSTRAP — find/create Drive folders + database.json
    ========================================================= */
@@ -586,6 +596,15 @@ function renderDayAgenda(events) {
     const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
     const type = props.type || "work";
     const time = evt.start.dateTime ? fmtTimeHuman(evt.start.dateTime) : "All day";
+    const isCompleted = props.completed === "true";
+
+    const checkboxAttrs = {
+      type: "checkbox",
+      class: "agenda-checkbox",
+      title: "Mark completed",
+      onchange: (e) => toggleEventCompleted(evt, e.target.checked),
+    };
+    if (isCompleted) checkboxAttrs.checked = "checked";
 
     let row;
     if (type === "lesson") {
@@ -594,13 +613,20 @@ function renderDayAgenda(events) {
       const displayName = (student ? student.name : props.studentName || "Student") + (horse ? " — " + horse.name : "");
       row = el(
         "div",
-        { class: "agenda-row" },
+        { class: "agenda-row" + (isCompleted ? " completed" : "") },
+        el("input", checkboxAttrs),
         el("div", { class: "agenda-time" }, time),
         avatarEl(student, "small"),
         el(
           "div",
           { class: "agenda-info" },
-          el("div", { class: "agenda-horse" }, el("span", { class: "type-badge lesson" }, "Lesson"), displayName),
+          el(
+            "div",
+            { class: "agenda-horse" },
+            el("span", { class: "type-badge lesson" }, "Lesson"),
+            displayName,
+            isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+          ),
           el("div", { class: "agenda-rider" }, props.instructor ? "Instructor: " + props.instructor : "")
         ),
         el(
@@ -623,13 +649,20 @@ function renderDayAgenda(events) {
       const rider = props.rider || "";
       row = el(
         "div",
-        { class: "agenda-row" },
+        { class: "agenda-row" + (isCompleted ? " completed" : "") },
+        el("input", checkboxAttrs),
         el("div", { class: "agenda-time" }, time),
         avatarEl(horse, "small"),
         el(
           "div",
           { class: "agenda-info" },
-          el("div", { class: "agenda-horse" }, el("span", { class: "type-badge" }, "Work"), horseName),
+          el(
+            "div",
+            { class: "agenda-horse" },
+            el("span", { class: "type-badge" }, "Work"),
+            horseName,
+            isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
+          ),
           el("div", { class: "agenda-rider" }, rider ? "Rider: " + rider : "")
         ),
         el(
@@ -650,6 +683,19 @@ function renderDayAgenda(events) {
     dayCard.appendChild(row);
   });
   list.appendChild(dayCard);
+}
+
+async function toggleEventCompleted(evt, isChecked) {
+  const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+  const newProps = Object.assign({}, props, { completed: isChecked ? "true" : "false" });
+  try {
+    await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
+    showToast(isChecked ? "Marked completed" : "Marked not completed");
+    renderSchedule();
+  } catch (err) {
+    showToast("Couldn't update: " + err.message, true);
+    renderSchedule();
+  }
 }
 
 async function deleteSession(eventId) {
@@ -957,7 +1003,8 @@ function renderHorseProfile(horseId) {
         "button",
         { class: "btn btn-ghost small", onclick: () => toggleHorseActive(horse) },
         horse.active ? "Mark Inactive" : "Mark Active"
-      )
+      ),
+      el("button", { class: "btn btn-danger small", onclick: () => deleteHorse(horse) }, "Delete Horse")
     )
   );
 
@@ -974,6 +1021,29 @@ async function toggleHorseActive(horse) {
   } catch (err) {
     horse.active = !horse.active;
     showToast("Couldn't update: " + err.message, true);
+  }
+}
+
+async function deleteHorse(horse) {
+  const ok = confirm(
+    `Delete ${horse.name}? This also deletes their report card history in the app.\n\nCalendar sessions and uploaded photos will NOT be deleted automatically — remove those separately if you want them gone too.\n\nThis can't be undone.`
+  );
+  if (!ok) return;
+
+  const horseIdx = state.db.horses.findIndex((h) => h.id === horse.id);
+  const removedHorse = state.db.horses[horseIdx];
+  const removedCards = state.db.reportCards.filter((c) => c.horseId === horse.id);
+  state.db.horses = state.db.horses.filter((h) => h.id !== horse.id);
+  state.db.reportCards = state.db.reportCards.filter((c) => c.horseId !== horse.id);
+
+  try {
+    await saveDb();
+    showToast("Horse deleted");
+    navigate("horses");
+  } catch (err) {
+    state.db.horses.splice(horseIdx, 0, removedHorse);
+    state.db.reportCards = state.db.reportCards.concat(removedCards);
+    showToast("Couldn't delete horse: " + err.message, true);
   }
 }
 
@@ -1284,7 +1354,8 @@ function renderStudentProfile(studentId) {
         "button",
         { class: "btn btn-ghost small", onclick: () => toggleStudentActive(student) },
         student.active ? "Mark Inactive" : "Mark Active"
-      )
+      ),
+      el("button", { class: "btn btn-danger small", onclick: () => deleteStudent(student) }, "Delete Student")
     )
   );
 
@@ -1301,6 +1372,29 @@ async function toggleStudentActive(student) {
   } catch (err) {
     student.active = !student.active;
     showToast("Couldn't update: " + err.message, true);
+  }
+}
+
+async function deleteStudent(student) {
+  const ok = confirm(
+    `Delete ${student.name}? This also deletes their lesson log history in the app.\n\nCalendar lessons and uploaded photos will NOT be deleted automatically — remove those separately if you want them gone too.\n\nThis can't be undone.`
+  );
+  if (!ok) return;
+
+  const studentIdx = state.db.students.findIndex((s) => s.id === student.id);
+  const removedStudent = state.db.students[studentIdx];
+  const removedLogs = state.db.lessonLogs.filter((l) => l.studentId === student.id);
+  state.db.students = state.db.students.filter((s) => s.id !== student.id);
+  state.db.lessonLogs = state.db.lessonLogs.filter((l) => l.studentId !== student.id);
+
+  try {
+    await saveDb();
+    showToast("Student deleted");
+    navigate("students");
+  } catch (err) {
+    state.db.students.splice(studentIdx, 0, removedStudent);
+    state.db.lessonLogs = state.db.lessonLogs.concat(removedLogs);
+    showToast("Couldn't delete student: " + err.message, true);
   }
 }
 
@@ -1375,7 +1469,7 @@ function emailLessonLogToFamily(student, log, horse) {
 function openLessonLogModal(studentId, horseId, defaultDate) {
   state.currentStudentId = studentId;
   $("#llDate").value = defaultDate || todayStr();
-  $("#llInstructor").value = "Shariti";
+  $("#llInstructor").value = "Laken";
 
   const horseSelect = $("#llHorse");
   horseSelect.innerHTML = "";
