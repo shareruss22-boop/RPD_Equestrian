@@ -1201,16 +1201,63 @@ function openHorseModal(horse) {
 
 $("#addHorseBtn").addEventListener("click", () => openHorseModal(null));
 
+// The owner select doubles as a direct "put this horse on the same account
+// as..." picker: existing owner accounts show up as-is, and any student who
+// doesn't already have an owner account shows up too (prefixed "student:" in
+// its option value) — picking one silently creates a lightweight owner
+// account for that student on save, no separate "add owner" step needed.
+// The "+ New Owner" button is only for owners who are NOT students.
 function populateOwnerSelect(selectedId) {
   const select = $("#horseOwnerId");
   if (!select) return;
-  const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
   select.innerHTML = "";
   select.appendChild(el("option", { value: "" }, "— No owner linked —"));
-  owners.forEach((o) => {
-    select.appendChild(el("option", { value: o.id }, o.name + (o.email ? " (" + o.email + ")" : "")));
-  });
+
+  const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (owners.length) {
+    const ownerGroup = el("optgroup", { label: "Existing owner accounts" });
+    owners.forEach((o) => {
+      ownerGroup.appendChild(
+        el("option", { value: o.id }, o.name + (o.studentId ? " (student)" : "") + (o.email ? " — " + o.email : ""))
+      );
+    });
+    select.appendChild(ownerGroup);
+  }
+
+  const unlinkedStudents = state.db.students
+    .filter((s) => !ownerForStudent(s.id))
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (unlinkedStudents.length) {
+    const studentGroup = el("optgroup", { label: "Students (same account as...)" });
+    unlinkedStudents.forEach((s) => {
+      studentGroup.appendChild(el("option", { value: "student:" + s.id }, s.name));
+    });
+    select.appendChild(studentGroup);
+  }
+
   select.value = selectedId || "";
+}
+
+// Reuses a student's existing owner account if they already have one
+// (e.g. from a previously linked horse); otherwise creates one from their
+// student contact info so it can be reused by future horses on the same account.
+function getOrCreateOwnerForStudent(studentId) {
+  const existing = ownerForStudent(studentId);
+  if (existing) return existing;
+  const student = state.db.students.find((s) => s.id === studentId);
+  if (!student) return null;
+  const owner = {
+    id: uuid(),
+    studentId: student.id,
+    name: student.name,
+    email: student.contactEmail || "",
+    phone: student.contactPhone || "",
+    notes: "",
+    createdAt: new Date().toISOString(),
+  };
+  state.db.owners.push(owner);
+  return owner;
 }
 
 const horseAddOwnerBtnEl = $("#horseAddOwnerBtn");
@@ -1242,12 +1289,18 @@ $("#horseForm").addEventListener("submit", async (e) => {
       };
     }
 
+    let ownerSelectVal = $("#horseOwnerId").value || null;
+    if (ownerSelectVal && ownerSelectVal.startsWith("student:")) {
+      const owner = getOrCreateOwnerForStudent(ownerSelectVal.slice("student:".length));
+      ownerSelectVal = owner ? owner.id : null;
+    }
+
     const horseData = {
       id,
       name: $("#horseName").value.trim(),
       breed: $("#horseBreed").value.trim(),
       age: $("#horseAge").value.trim(),
-      ownerId: $("#horseOwnerId").value || null,
+      ownerId: ownerSelectVal,
       programDaysPerWeek: $("#horseProgramDays").value ? Number($("#horseProgramDays").value) : null,
       programNotes: $("#horseProgramNotes").value.trim(),
       notes: $("#horseNotes").value.trim(),
