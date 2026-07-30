@@ -9,7 +9,8 @@ const CONFIG = {
   CLIENT_ID: "288317276128-d94db2aofp0it4glcsscbm4jaq7go01j.apps.googleusercontent.com",
   CALENDAR_ID: "8920f5279f3d5f19d97bb40abcf840dcbec4f15c8e1467a2be6b0b61734f2d6f@group.calendar.google.com",
   CALENDAR_EMBED_SRC: "https://calendar.google.com/calendar/embed?src=8920f5279f3d5f19d97bb40abcf840dcbec4f15c8e1467a2be6b0b61734f2d6f%40group.calendar.google.com&ctz=America%2FNew_York",
-  SCOPES: "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive",
+  SCOPES: "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.send",
+  MAX_ATTACHMENT_BYTES: 20 * 1024 * 1024,
   APP_FOLDER_NAME: "RPD Equestrian Data",
   MEDIA_FOLDER_NAME: "Media",
   PROFILES_FOLDER_NAME: "Profiles",
@@ -435,6 +436,97 @@ async function calendarPatchEvent(eventId, patchBody) {
   return res.json();
 }
 
+/* ---- Gmail (real email sending with attachments) ---- */
+async function driveDownloadFile(fileId) {
+  const res = await apiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  return res.arrayBuffer();
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+  }
+  return btoa(binary);
+}
+
+function arrayBufferToBase64(buffer) {
+  return bytesToBase64(new Uint8Array(buffer));
+}
+
+function base64UrlFromString(str) {
+  return bytesToBase64(new TextEncoder().encode(str))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function encodeMimeSubject(subject) {
+  if (/^[\x00-\x7F]*$/.test(subject)) return subject;
+  return `=?UTF-8?B?${btoa(unescape(encodeURIComponent(subject)))}?=`;
+}
+
+function buildMimeMessage({ to, subject, bodyText, attachments }) {
+  const boundary = "rpdmail" + Date.now() + Math.random().toString(16).slice(2);
+  let msg = "";
+  msg += `To: ${to}\r\n`;
+  msg += `Subject: ${encodeMimeSubject(subject)}\r\n`;
+  msg += `MIME-Version: 1.0\r\n`;
+  msg += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n\r\n`;
+  msg += `--${boundary}\r\n`;
+  msg += `Content-Type: text/plain; charset="UTF-8"\r\n\r\n`;
+  msg += `${bodyText}\r\n\r\n`;
+  (attachments || []).forEach((att) => {
+    msg += `--${boundary}\r\n`;
+    msg += `Content-Type: ${att.mimeType || "application/octet-stream"}; name="${att.filename}"\r\n`;
+    msg += `Content-Disposition: attachment; filename="${att.filename}"\r\n`;
+    msg += `Content-Transfer-Encoding: base64\r\n\r\n`;
+    msg += `${att.base64Data}\r\n\r\n`;
+  });
+  msg += `--${boundary}--`;
+  return msg;
+}
+
+async function gmailSendEmail({ to, subject, bodyText, attachments }) {
+  const raw = base64UrlFromString(buildMimeMessage({ to, subject, bodyText, attachments }));
+  const res = await apiFetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ raw }),
+  });
+  return res.json();
+}
+
+// Downloads each media item from Drive and base64-encodes it for attaching.
+// Items over CONFIG.MAX_ATTACHMENT_BYTES or that fail to download are returned
+// in `unattached` so callers can fall back to linking them instead.
+async function prepareEmailAttachments(mediaList) {
+  const attachments = [];
+  const unattached = [];
+  for (const m of mediaList || []) {
+    if (!m.fileId) { unattached.push(m); continue; }
+    try {
+      const metaRes = await apiFetch(
+        `https://www.googleapis.com/drive/v3/files/${m.fileId}?fields=size,mimeType,name`
+      );
+      const meta = await metaRes.json();
+      const size = Number(meta.size || 0);
+      if (size && size > CONFIG.MAX_ATTACHMENT_BYTES) { unattached.push(m); continue; }
+      const buffer = await driveDownloadFile(m.fileId);
+      attachments.push({
+        filename: meta.name || m.name || "attachment",
+        mimeType: meta.mimeType || m.mimeType || "application/octet-stream",
+        base64Data: arrayBufferToBase64(buffer),
+      });
+    } catch (err) {
+      console.warn("Could not attach file", m, err);
+      unattached.push(m);
+    }
+  }
+  return { attachments, unattached };
+}
+
 /* =========================================================
    BOOTSTRAP — find/create Drive folders + database.json
    ========================================================= */
@@ -511,13 +603,40 @@ document.querySelectorAll(".nav-link").forEach((btn) => {
 /* =========================================================
    AVATAR HELPER (shared by horse cards, student cards, profiles, agenda)
    ========================================================= */
+/* Google's Drive API "thumbnailLink" field is only meant for the Drive UI
+   itself and frequently 403s or goes stale when hotlinked from another
+   site. The public /thumbnail?id= endpoint is what Drive uses for
+   embedding shared files and stays reliable as long as the file is
+   shared "anyone with the link can view" (which driveUploadMedia sets). */
+function driveThumbUrl(fileId, size) {
+  if (!fileId) return "";
+  return `https://drive.google.com/thumbnail?id=${fileId}&sz=w${size || 200}`;
+}
+
 function avatarEl(entity, sizeClass) {
   const cls = "horse-thumb" + (sizeClass ? " " + sizeClass : "");
-  if (entity && entity.photo && entity.photo.thumbnailLink) {
-    return el("img", { class: cls, src: entity.photo.thumbnailLink, alt: entity.name || "" });
+  if (entity && entity.photo && entity.photo.fileId) {
+    return el("img", {
+      class: cls,
+      src: driveThumbUrl(entity.photo.fileId, 160),
+      alt: entity.name || "",
+      onerror: (e) => { e.target.replaceWith(avatarFallback(entity, cls)); },
+    });
   }
+  return avatarFallback(entity, cls);
+}
+
+function avatarFallback(entity, cls) {
   const initial = entity && entity.name ? entity.name.trim().charAt(0).toUpperCase() : "?";
   return el("div", { class: cls + " horse-thumb-fallback" }, initial);
+}
+
+function mediaThumbImg(fileId, size) {
+  const img = el("img", { src: driveThumbUrl(fileId, size) });
+  img.addEventListener("error", () => {
+    img.replaceWith(el("span", {}, "📷"));
+  });
+  return img;
 }
 
 /* =========================================================
@@ -644,7 +763,13 @@ function renderDayAgenda(events) {
               { class: "agenda-horse" },
               avatarEl(student, "small"),
               el("span", { class: "type-badge lesson" }, "Lesson"),
-              displayName,
+              el("span", {
+                class: "agenda-name-link",
+                onclick: () => {
+                  if (student) navigate("student-profile", student.id);
+                  else showToast("This lesson isn't linked to a student profile.", true);
+                },
+              }, displayName),
               isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
             ),
             el("div", { class: "agenda-rider" }, props.instructor ? "Instructor: " + props.instructor : "")
@@ -662,8 +787,12 @@ function renderDayAgenda(events) {
               class: "btn btn-ghost btn-icon",
               title: "Log Lesson",
               onclick: () => {
-                if (student) openLessonLogModal(student.id, horse ? horse.id : "", state.scheduleDate);
-                else showToast("This lesson isn't linked to a student profile.", true);
+                if (student) {
+                  openLessonLogModal(student.id, horse ? horse.id : "", state.scheduleDate, null, {
+                    instructor: props.instructor,
+                    notes: evt.description || "",
+                  });
+                } else showToast("This lesson isn't linked to a student profile.", true);
               },
             }, "📝"),
             el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openLessonModal(evt) }, "✏️")
@@ -694,7 +823,13 @@ function renderDayAgenda(events) {
               { class: "agenda-horse" },
               avatarEl(horse, "small"),
               el("span", { class: "type-badge" }, "Work"),
-              horseName,
+              el("span", {
+                class: "agenda-name-link",
+                onclick: () => {
+                  if (horse) navigate("horse-profile", horse.id);
+                  else showToast("This session isn't linked to a horse profile.", true);
+                },
+              }, horseName),
               isCompleted ? el("span", { class: "completed-badge" }, "✓ Completed") : null
             ),
             el("div", { class: "agenda-rider" }, rider ? "Rider: " + rider : "")
@@ -712,8 +847,12 @@ function renderDayAgenda(events) {
               class: "btn btn-ghost btn-icon",
               title: "Log Report Card",
               onclick: () => {
-                if (horse) openReportCardModal(horse.id, state.scheduleDate);
-                else showToast("This session isn't linked to a horse profile.", true);
+                if (horse) {
+                  openReportCardModal(horse.id, state.scheduleDate, null, {
+                    rider: props.rider,
+                    notes: evt.description || "",
+                  });
+                } else showToast("This session isn't linked to a horse profile.", true);
               },
             }, "📝"),
             el("button", { class: "btn btn-ghost btn-icon", title: "Edit", onclick: () => openSessionModal(evt) }, "✏️")
@@ -992,8 +1131,8 @@ function openHorseModal(horse) {
   $("#horsePhoto").value = "";
 
   const previewWrap = $("#horsePhotoPreviewWrap");
-  if (horse && horse.photo && horse.photo.thumbnailLink) {
-    $("#horsePhotoPreview").src = horse.photo.thumbnailLink;
+  if (horse && horse.photo && horse.photo.fileId) {
+    $("#horsePhotoPreview").src = driveThumbUrl(horse.photo.fileId, 200);
     previewWrap.hidden = false;
   } else {
     previewWrap.hidden = true;
@@ -1191,7 +1330,7 @@ function renderReportCards(horseId) {
         const thumb = el(
           "a",
           { class: "media-thumb", href: m.webViewLink, target: "_blank", rel: "noopener" },
-          isImg && m.thumbnailLink ? el("img", { src: m.thumbnailLink }) : document.createTextNode(m.mimeType && m.mimeType.startsWith("video/") ? "🎥 video" : "📎 file")
+          isImg && m.fileId ? mediaThumbImg(m.fileId, 200) : document.createTextNode(m.mimeType && m.mimeType.startsWith("video/") ? "🎥 video" : "📎 file")
         );
         thumbWrap.appendChild(thumb);
       });
@@ -1203,7 +1342,7 @@ function renderReportCards(horseId) {
       actions.appendChild(
         el(
           "button",
-          { class: "btn btn-ghost small", onclick: () => emailReportCardToOwner(horse, c) },
+          { class: "btn btn-ghost small", onclick: (e) => emailReportCardToOwner(horse, c, e.currentTarget) },
           "Email to Owner"
         )
       );
@@ -1253,29 +1392,63 @@ function textReportCardToOwner(horse, card) {
   window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
-function emailReportCardToOwner(horse, card) {
+async function emailReportCardToOwner(horse, card, btn) {
+  if (!horse.ownerEmail) { showToast("No owner email on file.", true); return; }
+  const origText = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+
   const subject = `Work Report for ${horse.name} — ${fmtDateHuman(card.date)}`;
-  let body = `Hi ${horse.ownerName || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
-  if (card.exercises) body += `\nExercises/notes: ${card.exercises}\n`;
-  body += `\nRidden by: ${card.rider}\n`;
-  if (card.media && card.media.length) {
-    body += `\nPhotos/Videos:\n` + card.media.map((m) => m.webViewLink).join("\n");
+  let baseBody = `Hi ${horse.ownerName || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
+  if (card.exercises) baseBody += `\nExercises/notes: ${card.exercises}\n`;
+  baseBody += `\nRidden by: ${card.rider}\n`;
+
+  try {
+    let attachments = [];
+    let unattached = [];
+    if (card.media && card.media.length) {
+      const prepared = await prepareEmailAttachments(card.media);
+      attachments = prepared.attachments;
+      unattached = prepared.unattached;
+    }
+    let bodyText = baseBody;
+    if (unattached.length) {
+      const links = unattached.map((m) => m.webViewLink).filter(Boolean);
+      if (links.length) bodyText += `\nAdditional photos/videos:\n` + links.join("\n") + "\n";
+    }
+    bodyText += `\n— RPD Equestrian`;
+
+    await gmailSendEmail({ to: horse.ownerEmail, subject, bodyText, attachments });
+    showToast(attachments.length ? `Email sent with ${attachments.length} attachment(s).` : "Email sent.");
+  } catch (err) {
+    console.warn("Gmail send failed, falling back to mailto", err);
+    if (/insufficient|scope|permission|403/i.test(err.message || "")) {
+      showToast("Need permission to send email with attachments — please re-authorize, then try again.", true);
+      requestSignIn(true);
+    } else {
+      showToast("Couldn't send email automatically, opening your email app instead.", true);
+    }
+    let fallbackBody = baseBody;
+    if (card.media && card.media.length) {
+      const links = card.media.map((m) => m.webViewLink).filter(Boolean);
+      if (links.length) fallbackBody += `\nPhotos/Videos:\n` + links.join("\n") + "\n";
+    }
+    fallbackBody += `\n— RPD Equestrian`;
+    window.location.href = `mailto:${encodeURIComponent(horse.ownerEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText || "Email to Owner"; }
   }
-  body += `\n\n— RPD Equestrian`;
-  const mailto = `mailto:${encodeURIComponent(horse.ownerEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  window.location.href = mailto;
 }
 
 /* ---- Add / Edit Report Card modal ---- */
-function openReportCardModal(horseId, defaultDate, editCard) {
+function openReportCardModal(horseId, defaultDate, editCard, scheduleDefaults) {
   state.currentHorseId = horseId;
   state.editingReportCardId = editCard ? editCard.id : null;
   $("#reportCardModalTitle").textContent = editCard ? "Edit Report Card" : "New Report Card";
   $("#rcSubmitBtn").textContent = editCard ? "Update Report Card" : "Save Report Card";
   $("#rcDate").value = editCard ? editCard.date : (defaultDate || todayStr());
-  $("#rcRider").value = editCard ? editCard.rider : "Shariti";
+  $("#rcRider").value = editCard ? editCard.rider : ((scheduleDefaults && scheduleDefaults.rider) || "Shariti");
   $("#rcSummary").value = editCard ? editCard.summary : "";
-  $("#rcExercises").value = editCard ? editCard.exercises : "";
+  $("#rcExercises").value = editCard ? editCard.exercises : ((scheduleDefaults && scheduleDefaults.notes) || "");
   $("#rcMedia").value = "";
   $("#rcUploadStatus").textContent = editCard && editCard.media && editCard.media.length
     ? `${editCard.media.length} file(s) already attached — choosing new files will add more.`
@@ -1397,8 +1570,8 @@ function openStudentModal(student) {
   $("#studentPhoto").value = "";
 
   const previewWrap = $("#studentPhotoPreviewWrap");
-  if (student && student.photo && student.photo.thumbnailLink) {
-    $("#studentPhotoPreview").src = student.photo.thumbnailLink;
+  if (student && student.photo && student.photo.fileId) {
+    $("#studentPhotoPreview").src = driveThumbUrl(student.photo.fileId, 200);
     previewWrap.hidden = false;
   } else {
     previewWrap.hidden = true;
@@ -1594,7 +1767,7 @@ function renderLessonLogs(studentId) {
           el(
             "a",
             { class: "media-thumb", href: m.webViewLink, target: "_blank", rel: "noopener" },
-            isImg && m.thumbnailLink ? el("img", { src: m.thumbnailLink }) : document.createTextNode(m.mimeType && m.mimeType.startsWith("video/") ? "🎥 video" : "📎 file")
+            isImg && m.fileId ? mediaThumbImg(m.fileId, 200) : document.createTextNode(m.mimeType && m.mimeType.startsWith("video/") ? "🎥 video" : "📎 file")
           )
         );
       });
@@ -1604,7 +1777,7 @@ function renderLessonLogs(studentId) {
     const actions = el("div", { class: "profile-actions" });
     if (student && student.contactEmail) {
       actions.appendChild(
-        el("button", { class: "btn btn-ghost small", onclick: () => emailLessonLogToFamily(student, l, horse) }, "Email to Family")
+        el("button", { class: "btn btn-ghost small", onclick: (e) => emailLessonLogToFamily(student, l, horse, e.currentTarget) }, "Email to Family")
       );
     }
     if (student && student.contactPhone) {
@@ -1648,27 +1821,61 @@ function textLessonLogToFamily(student, log, horse) {
   window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
-function emailLessonLogToFamily(student, log, horse) {
+async function emailLessonLogToFamily(student, log, horse, btn) {
+  if (!student.contactEmail) { showToast("No family email on file.", true); return; }
+  const origText = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+
   const subject = `Lesson Report for ${student.name} — ${fmtDateHuman(log.date)}`;
-  let body = `Hi${student.guardianName ? " " + student.guardianName : ""},\n\nHere's what ${student.name} worked on${horse ? " on " + horse.name : ""}:\n\n${log.summary}\n`;
-  if (log.exercises) body += `\nExercises/notes: ${log.exercises}\n`;
-  body += `\nInstructor: ${log.instructor}\n`;
-  if (log.media && log.media.length) {
-    body += `\nPhotos/Videos:\n` + log.media.map((m) => m.webViewLink).join("\n");
+  let baseBody = `Hi${student.guardianName ? " " + student.guardianName : ""},\n\nHere's what ${student.name} worked on${horse ? " on " + horse.name : ""}:\n\n${log.summary}\n`;
+  if (log.exercises) baseBody += `\nExercises/notes: ${log.exercises}\n`;
+  baseBody += `\nInstructor: ${log.instructor}\n`;
+
+  try {
+    let attachments = [];
+    let unattached = [];
+    if (log.media && log.media.length) {
+      const prepared = await prepareEmailAttachments(log.media);
+      attachments = prepared.attachments;
+      unattached = prepared.unattached;
+    }
+    let bodyText = baseBody;
+    if (unattached.length) {
+      const links = unattached.map((m) => m.webViewLink).filter(Boolean);
+      if (links.length) bodyText += `\nAdditional photos/videos:\n` + links.join("\n") + "\n";
+    }
+    bodyText += `\n— RPD Equestrian`;
+
+    await gmailSendEmail({ to: student.contactEmail, subject, bodyText, attachments });
+    showToast(attachments.length ? `Email sent with ${attachments.length} attachment(s).` : "Email sent.");
+  } catch (err) {
+    console.warn("Gmail send failed, falling back to mailto", err);
+    if (/insufficient|scope|permission|403/i.test(err.message || "")) {
+      showToast("Need permission to send email with attachments — please re-authorize, then try again.", true);
+      requestSignIn(true);
+    } else {
+      showToast("Couldn't send email automatically, opening your email app instead.", true);
+    }
+    let fallbackBody = baseBody;
+    if (log.media && log.media.length) {
+      const links = log.media.map((m) => m.webViewLink).filter(Boolean);
+      if (links.length) fallbackBody += `\nPhotos/Videos:\n` + links.join("\n") + "\n";
+    }
+    fallbackBody += `\n— RPD Equestrian`;
+    window.location.href = `mailto:${encodeURIComponent(student.contactEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText || "Email to Family"; }
   }
-  body += `\n\n— RPD Equestrian`;
-  const mailto = `mailto:${encodeURIComponent(student.contactEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  window.location.href = mailto;
 }
 
 /* ---- Add / Edit Lesson Log modal ---- */
-function openLessonLogModal(studentId, horseId, defaultDate, editLog) {
+function openLessonLogModal(studentId, horseId, defaultDate, editLog, scheduleDefaults) {
   state.currentStudentId = studentId;
   state.editingLessonLogId = editLog ? editLog.id : null;
   $("#lessonLogModalTitle").textContent = editLog ? "Edit Lesson Log" : "New Lesson Log";
   $("#llSubmitBtn").textContent = editLog ? "Update Lesson Log" : "Save Lesson Log";
   $("#llDate").value = editLog ? editLog.date : (defaultDate || todayStr());
-  $("#llInstructor").value = editLog ? editLog.instructor : "Laken";
+  $("#llInstructor").value = editLog ? editLog.instructor : ((scheduleDefaults && scheduleDefaults.instructor) || "Laken");
 
   const horseSelect = $("#llHorse");
   horseSelect.innerHTML = "";
@@ -1677,7 +1884,7 @@ function openLessonLogModal(studentId, horseId, defaultDate, editLog) {
   horseSelect.value = editLog ? (editLog.horseId || "") : (horseId || "");
 
   $("#llSummary").value = editLog ? editLog.summary : "";
-  $("#llExercises").value = editLog ? editLog.exercises : "";
+  $("#llExercises").value = editLog ? editLog.exercises : ((scheduleDefaults && scheduleDefaults.notes) || "");
   $("#llMedia").value = "";
   $("#llUploadStatus").textContent = editLog && editLog.media && editLog.media.length
     ? `${editLog.media.length} file(s) already attached — choosing new files will add more.`
