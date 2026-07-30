@@ -250,6 +250,9 @@ button, input, select, textarea {
 .agenda-horse { font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agenda-name-link { cursor: pointer; text-decoration: underline; text-decoration-color: var(--green-300); text-underline-offset: 2px; }
 .agenda-name-link:hover { color: var(--green-700); }
+
+.owner-select-row { display: flex; gap: 8px; align-items: center; }
+.owner-select-row select { flex: 1; }
 .agenda-rider { color: var(--text-muted); font-size: 0.9rem; }
 .agenda-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: nowrap; }
 .agenda-other-actions { display: flex; align-items: center; gap: 6px; }

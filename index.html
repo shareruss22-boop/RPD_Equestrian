@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>RPD Equestrian</title>
-<link rel="stylesheet" href="styles.css?v=12" />
+<link rel="stylesheet" href="styles.css?v=13" />
 </head>
 <body>
 
@@ -18,6 +18,7 @@
         <button class="nav-link" data-route="schedule">Schedule</button>
         <button class="nav-link" data-route="horses">Horses</button>
         <button class="nav-link" data-route="students">Students</button>
+        <button class="nav-link" data-route="owners">Owners</button>
       </nav>
       <div class="topbar-right">
         <span id="userChip" class="user-chip" hidden></span>
@@ -131,6 +132,24 @@
       </div>
       <div id="lessonLogList" class="report-card-list"></div>
     </section>
+
+    <section id="ownersView" class="view" hidden>
+      <div class="view-header">
+        <h1>Owners</h1>
+        <button id="addOwnerBtn" class="btn btn-primary">+ Add Owner</button>
+      </div>
+      <div id="ownersGrid" class="horses-grid"></div>
+    </section>
+
+    <section id="ownerProfileView" class="view" hidden>
+      <button id="backToOwnersBtn" class="btn btn-ghost small">← Back to Owners</button>
+      <div id="ownerProfileHeader" class="horse-profile-header"></div>
+      <div class="view-header">
+        <h2>Linked Horses</h2>
+      </div>
+      <div id="ownerHorseLinkRow" class="filter-row"></div>
+      <div id="ownerHorseList" class="report-card-list"></div>
+    </section>
   </main>
 
   <!-- Add / Edit Horse Modal -->
@@ -154,13 +173,12 @@
           <label>Breed<input type="text" id="horseBreed" /></label>
           <label>Age<input type="text" id="horseAge" /></label>
         </div>
-        <div class="form-row">
-          <label>Owner name<input type="text" id="horseOwnerName" /></label>
-          <label>Owner email<input type="email" id="horseOwnerEmail" /></label>
-        </div>
-        <div class="form-row">
-          <label>Owner phone (for texting report cards)<input type="tel" id="horseOwnerPhone" placeholder="e.g. 555-123-4567" /></label>
-        </div>
+        <label>Owner
+          <span class="owner-select-row">
+            <select id="horseOwnerId"></select>
+            <button type="button" id="horseAddOwnerBtn" class="btn btn-ghost small">+ New Owner</button>
+          </span>
+        </label>
         <div class="form-row">
           <label>Program (days/week)<input type="number" id="horseProgramDays" min="0" max="7" step="1" placeholder="e.g. 4" /></label>
           <label>Program notes<input type="text" id="horseProgramNotes" placeholder="e.g. Mon/Wed/Fri" /></label>
@@ -335,9 +353,37 @@
     </div>
   </div>
 
+  <!-- Add / Edit Owner Modal -->
+  <div id="ownerModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="ownerModalTitle">Add Owner</h2>
+        <button class="modal-close" data-close="ownerModal">&times;</button>
+      </div>
+      <form id="ownerForm" class="modal-body">
+        <input type="hidden" id="ownerId" />
+        <label>Is this owner also one of our students?
+          <select id="ownerStudentId">
+            <option value="">— Not a student —</option>
+          </select>
+        </label>
+        <label>Name *<input type="text" id="ownerName" required /></label>
+        <div class="form-row">
+          <label>Email<input type="email" id="ownerEmail" /></label>
+          <label>Phone<input type="tel" id="ownerPhone" placeholder="e.g. 555-123-4567" /></label>
+        </div>
+        <label>Notes<textarea id="ownerNotes" rows="2"></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-close="ownerModal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="ownerSubmitBtn">Save Owner</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

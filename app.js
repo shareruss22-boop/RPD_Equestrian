@@ -28,10 +28,11 @@ const state = {
   mediaFolderId: null,
   profilesFolderId: null,
   dbFileId: null,
-  db: { horses: [], reportCards: [], students: [], lessonLogs: [] },
+  db: { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [] },
   currentView: "schedule",
   currentHorseId: null,
   currentStudentId: null,
+  currentOwnerId: null,
   editingReportCardId: null,
   editingLessonLogId: null,
   editingSessionEventId: null,
@@ -39,6 +40,7 @@ const state = {
   horseFilter: "active",
   studentFilter: "active",
   scheduleDate: null, // set once utils are defined
+  _ownerModalContext: null,
 };
 
 /* ---------------- UTIL ---------------- */
@@ -545,7 +547,7 @@ async function bootstrapData() {
     const q = `name='${CONFIG.DB_FILE_NAME}' and '${state.appFolderId}' in parents and trashed=false`;
     let dbFile = await driveFindOne(q);
     if (!dbFile) {
-      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [], students: [], lessonLogs: [] });
+      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [] });
     }
     state.dbFileId = dbFile.id;
 
@@ -555,6 +557,10 @@ async function bootstrapData() {
     if (!state.db.reportCards) state.db.reportCards = [];
     if (!state.db.students) state.db.students = [];
     if (!state.db.lessonLogs) state.db.lessonLogs = [];
+    if (!state.db.owners) state.db.owners = [];
+
+    const migratedOwners = migrateOwnersFromHorses();
+    if (migratedOwners) await saveDb();
 
     $("#calendarEmbed").src = CONFIG.CALENDAR_EMBED_SRC;
 
@@ -567,6 +573,53 @@ async function bootstrapData() {
 
 async function saveDb() {
   await driveUpdateJson(state.dbFileId, state.db);
+}
+
+/* ---- Owners: one-time migration of legacy per-horse owner fields ----
+   Older horse records stored ownerName/ownerEmail/ownerPhone directly on
+   the horse. This groups those into proper Owner records (deduped by
+   email, falling back to name) and links each horse via horse.ownerId,
+   so a single owner can have multiple horses linked to their account. */
+function migrateOwnersFromHorses() {
+  let changed = false;
+  state.db.horses.forEach((h) => {
+    if (h.ownerId) return;
+    if (!h.ownerName && !h.ownerEmail && !h.ownerPhone) return;
+    const emailKey = (h.ownerEmail || "").trim().toLowerCase();
+    const nameKey = (h.ownerName || "").trim().toLowerCase();
+    let owner = null;
+    if (emailKey) {
+      owner = state.db.owners.find((o) => (o.email || "").trim().toLowerCase() === emailKey);
+    }
+    if (!owner && nameKey) {
+      owner = state.db.owners.find((o) => !o.email && (o.name || "").trim().toLowerCase() === nameKey);
+    }
+    if (!owner) {
+      owner = {
+        id: uuid(),
+        name: h.ownerName || h.ownerEmail || h.ownerPhone || "Unnamed Owner",
+        email: h.ownerEmail || "",
+        phone: h.ownerPhone || "",
+        notes: "",
+        createdAt: new Date().toISOString(),
+      };
+      state.db.owners.push(owner);
+    }
+    h.ownerId = owner.id;
+    changed = true;
+  });
+  return changed;
+}
+
+function ownerForHorse(horse) {
+  return horse && horse.ownerId ? state.db.owners.find((o) => o.id === horse.ownerId) || null : null;
+}
+
+// Not every owner is a student, but some are (e.g. a rider who owns their
+// own horse) — this links an Owner record to that person's Student record
+// so billing/contact info can be shared instead of duplicated.
+function ownerForStudent(studentId) {
+  return state.db.owners.find((o) => o.studentId === studentId) || null;
 }
 
 /* =========================================================
@@ -593,6 +646,13 @@ function navigate(view, param) {
     state.currentStudentId = param;
     showOnly("studentProfileView");
     renderStudentProfile(param);
+  } else if (view === "owners") {
+    showOnly("ownersView");
+    renderOwners();
+  } else if (view === "owner-profile") {
+    state.currentOwnerId = param;
+    showOnly("ownerProfileView");
+    renderOwnerProfile(param);
   }
 }
 
@@ -1121,9 +1181,7 @@ function openHorseModal(horse) {
   $("#horseName").value = horse ? horse.name : "";
   $("#horseBreed").value = horse ? horse.breed || "" : "";
   $("#horseAge").value = horse ? horse.age || "" : "";
-  $("#horseOwnerName").value = horse ? horse.ownerName || "" : "";
-  $("#horseOwnerEmail").value = horse ? horse.ownerEmail || "" : "";
-  $("#horseOwnerPhone").value = horse ? horse.ownerPhone || "" : "";
+  populateOwnerSelect(horse ? horse.ownerId || "" : "");
   $("#horseProgramDays").value = horse && horse.programDaysPerWeek != null ? horse.programDaysPerWeek : "";
   $("#horseProgramNotes").value = horse ? horse.programNotes || "" : "";
   $("#horseNotes").value = horse ? horse.notes || "" : "";
@@ -1142,6 +1200,23 @@ function openHorseModal(horse) {
 }
 
 $("#addHorseBtn").addEventListener("click", () => openHorseModal(null));
+
+function populateOwnerSelect(selectedId) {
+  const select = $("#horseOwnerId");
+  if (!select) return;
+  const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
+  select.innerHTML = "";
+  select.appendChild(el("option", { value: "" }, "— No owner linked —"));
+  owners.forEach((o) => {
+    select.appendChild(el("option", { value: o.id }, o.name + (o.email ? " (" + o.email + ")" : "")));
+  });
+  select.value = selectedId || "";
+}
+
+const horseAddOwnerBtnEl = $("#horseAddOwnerBtn");
+if (horseAddOwnerBtnEl) {
+  horseAddOwnerBtnEl.addEventListener("click", () => openOwnerModal(null, { fromHorseModal: true }));
+}
 
 $("#horseForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1172,9 +1247,7 @@ $("#horseForm").addEventListener("submit", async (e) => {
       name: $("#horseName").value.trim(),
       breed: $("#horseBreed").value.trim(),
       age: $("#horseAge").value.trim(),
-      ownerName: $("#horseOwnerName").value.trim(),
-      ownerEmail: $("#horseOwnerEmail").value.trim(),
-      ownerPhone: $("#horseOwnerPhone").value.trim(),
+      ownerId: $("#horseOwnerId").value || null,
       programDaysPerWeek: $("#horseProgramDays").value ? Number($("#horseProgramDays").value) : null,
       programNotes: $("#horseProgramNotes").value.trim(),
       notes: $("#horseNotes").value.trim(),
@@ -1230,6 +1303,7 @@ function renderHorseProfile(horseId) {
       )
     )
   );
+  const horseOwner = ownerForHorse(horse);
   header.appendChild(
     el(
       "div",
@@ -1237,9 +1311,9 @@ function renderHorseProfile(horseId) {
       horse.breed ? el("span", {}, "Breed: " + escapeHtml(horse.breed)) : null,
       horse.age ? el("span", {}, "Age: " + escapeHtml(horse.age)) : null,
       horse.programDaysPerWeek ? el("span", {}, "Program: " + horse.programDaysPerWeek + "x/week" + (horse.programNotes ? " (" + escapeHtml(horse.programNotes) + ")" : "")) : null,
-      horse.ownerName ? el("span", {}, "Owner: " + escapeHtml(horse.ownerName)) : null,
-      horse.ownerEmail ? el("span", {}, escapeHtml(horse.ownerEmail)) : null,
-      horse.ownerPhone ? el("span", {}, escapeHtml(horse.ownerPhone)) : null
+      horseOwner
+        ? el("span", { class: "agenda-name-link", onclick: () => navigate("owner-profile", horseOwner.id) }, "Owner: " + escapeHtml(horseOwner.name))
+        : el("span", { class: "muted" }, "No owner linked")
     )
   );
   if (horse.notes) header.appendChild(el("p", { class: "muted" }, horse.notes));
@@ -1297,6 +1371,256 @@ async function deleteHorse(horse) {
   }
 }
 
+/* =========================================================
+   OWNERS — one owner account can be linked to multiple horses
+   ========================================================= */
+function renderOwners() {
+  const grid = $("#ownersGrid");
+  grid.innerHTML = "";
+  const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (!owners.length) {
+    grid.appendChild(el("p", { class: "empty-note" }, "No owners yet. Add one, or link one while editing a horse."));
+    return;
+  }
+  owners.forEach((o) => {
+    const horseCount = state.db.horses.filter((h) => h.ownerId === o.id).length;
+    const card = el(
+      "div",
+      { class: "horse-card", onclick: () => navigate("owner-profile", o.id) },
+      el("h3", {}, o.name),
+      el("p", { class: "muted small" }, [o.email, o.phone].filter(Boolean).join(" · ") || " "),
+      el("p", { class: "muted small" }, horseCount + " horse" + (horseCount === 1 ? "" : "s") + " linked"),
+      o.studentId ? el("span", { class: "badge" }, "Also a student") : null
+    );
+    grid.appendChild(card);
+  });
+}
+
+$("#addOwnerBtn").addEventListener("click", () => openOwnerModal(null));
+
+function populateOwnerStudentSelect(selectedId) {
+  const currentOwnerId = $("#ownerId").value || null;
+  const select = $("#ownerStudentId");
+  const students = state.db.students.slice().sort((a, b) => a.name.localeCompare(b.name));
+  select.innerHTML = "";
+  select.appendChild(el("option", { value: "" }, "— Not a student —"));
+  students.forEach((s) => {
+    // A student should only map to one owner account — skip students
+    // already linked to a *different* owner than the one being edited.
+    const existingOwner = ownerForStudent(s.id);
+    if (existingOwner && existingOwner.id !== currentOwnerId) return;
+    select.appendChild(el("option", { value: s.id }, s.name));
+  });
+  select.value = selectedId || "";
+}
+
+function openOwnerModal(owner, opts) {
+  $("#ownerModalTitle").textContent = owner ? "Edit Owner" : "Add Owner";
+  $("#ownerId").value = owner ? owner.id : "";
+  $("#ownerName").value = owner ? owner.name : "";
+  $("#ownerEmail").value = owner ? owner.email || "" : "";
+  $("#ownerPhone").value = owner ? owner.phone || "" : "";
+  $("#ownerNotes").value = owner ? owner.notes || "" : "";
+  populateOwnerStudentSelect(owner ? owner.studentId || "" : "");
+  state._ownerModalContext = opts || null;
+  openModal("ownerModal");
+}
+
+$("#ownerStudentId").addEventListener("change", () => {
+  const studentId = $("#ownerStudentId").value;
+  if (!studentId) return;
+  const student = state.db.students.find((s) => s.id === studentId);
+  if (!student) return;
+  // Convenience autofill — only fills blank fields, never overwrites what's already typed.
+  if (!$("#ownerName").value.trim()) $("#ownerName").value = student.name || "";
+  if (!$("#ownerEmail").value.trim()) $("#ownerEmail").value = student.contactEmail || "";
+  if (!$("#ownerPhone").value.trim()) $("#ownerPhone").value = student.contactPhone || "";
+});
+
+$("#ownerForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = $("#ownerId").value || uuid();
+  const isNew = !$("#ownerId").value;
+  const submitBtn = $("#ownerSubmitBtn");
+  submitBtn.disabled = true;
+  try {
+    const ownerData = {
+      id,
+      studentId: $("#ownerStudentId").value || null,
+      name: $("#ownerName").value.trim(),
+      email: $("#ownerEmail").value.trim(),
+      phone: $("#ownerPhone").value.trim(),
+      notes: $("#ownerNotes").value.trim(),
+      createdAt: isNew ? new Date().toISOString() : undefined,
+    };
+    if (isNew) {
+      state.db.owners.push(ownerData);
+    } else {
+      const idx = state.db.owners.findIndex((o) => o.id === id);
+      state.db.owners[idx] = Object.assign({}, state.db.owners[idx], ownerData, {
+        createdAt: state.db.owners[idx].createdAt,
+      });
+    }
+    await saveDb();
+    closeModal("ownerModal");
+    showToast(isNew ? "Owner added" : "Owner updated");
+
+    const ctx = state._ownerModalContext;
+    state._ownerModalContext = null;
+    if (ctx && ctx.fromHorseModal) {
+      populateOwnerSelect(id);
+    } else if (state.currentView === "owner-profile") {
+      renderOwnerProfile(id);
+    } else {
+      renderOwners();
+    }
+  } catch (err) {
+    showToast("Couldn't save owner: " + err.message, true);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Save Owner";
+  }
+});
+
+async function deleteOwner(owner) {
+  const linkedCount = state.db.horses.filter((h) => h.ownerId === owner.id).length;
+  const ok = confirm(
+    `Delete ${owner.name}?` +
+      (linkedCount ? ` ${linkedCount} horse(s) will be unlinked from this owner.` : "") +
+      `\n\nThis can't be undone.`
+  );
+  if (!ok) return;
+
+  const idx = state.db.owners.findIndex((o) => o.id === owner.id);
+  if (idx === -1) return;
+  const removed = state.db.owners[idx];
+  const touchedHorses = state.db.horses.filter((h) => h.ownerId === owner.id);
+  touchedHorses.forEach((h) => { h.ownerId = null; });
+  state.db.owners.splice(idx, 1);
+
+  try {
+    await saveDb();
+    showToast("Owner deleted");
+    navigate("owners");
+  } catch (err) {
+    state.db.owners.splice(idx, 0, removed);
+    touchedHorses.forEach((h) => { h.ownerId = removed.id; });
+    showToast("Couldn't delete owner: " + err.message, true);
+  }
+}
+
+$("#backToOwnersBtn").addEventListener("click", () => navigate("owners"));
+
+function renderOwnerProfile(ownerId) {
+  const owner = state.db.owners.find((o) => o.id === ownerId);
+  const header = $("#ownerProfileHeader");
+  const linkRow = $("#ownerHorseLinkRow");
+  const list = $("#ownerHorseList");
+  if (!owner) {
+    header.innerHTML = "<p>Owner not found.</p>";
+    linkRow.innerHTML = "";
+    list.innerHTML = "";
+    return;
+  }
+
+  const linkedStudent = owner.studentId ? state.db.students.find((s) => s.id === owner.studentId) : null;
+
+  header.innerHTML = "";
+  header.appendChild(el("div", { class: "profile-title-row" }, el("div", {}, el("h1", {}, owner.name))));
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-meta" },
+      owner.email ? el("span", {}, escapeHtml(owner.email)) : null,
+      owner.phone ? el("span", {}, escapeHtml(owner.phone)) : null,
+      linkedStudent
+        ? el("span", { class: "agenda-name-link", onclick: () => navigate("student-profile", linkedStudent.id) }, "Also a student: " + escapeHtml(linkedStudent.name))
+        : null
+    )
+  );
+  if (owner.notes) header.appendChild(el("p", { class: "muted" }, owner.notes));
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-actions" },
+      el("button", { class: "btn btn-ghost small", onclick: () => openOwnerModal(owner) }, "Edit Info"),
+      el("button", { class: "btn btn-danger small", onclick: () => deleteOwner(owner) }, "Delete Owner")
+    )
+  );
+
+  linkRow.innerHTML = "";
+  const otherHorses = state.db.horses.slice().sort((a, b) => a.name.localeCompare(b.name)).filter((h) => h.ownerId !== owner.id);
+  if (otherHorses.length) {
+    const select = el(
+      "select",
+      { id: "ownerLinkHorseSelect" },
+      el("option", { value: "" }, "— Choose a horse to link —"),
+      ...otherHorses.map((h) => el("option", { value: h.id }, h.name + (h.ownerId ? " (currently linked elsewhere)" : "")))
+    );
+    const linkBtn = el(
+      "button",
+      { class: "btn btn-ghost small", onclick: () => linkHorseToOwner(owner, select.value) },
+      "Link Horse"
+    );
+    linkRow.appendChild(select);
+    linkRow.appendChild(linkBtn);
+  }
+
+  list.innerHTML = "";
+  const linked = state.db.horses.filter((h) => h.ownerId === owner.id).sort((a, b) => a.name.localeCompare(b.name));
+  if (!linked.length) {
+    list.appendChild(el("p", { class: "empty-note" }, "No horses linked to this owner yet."));
+    return;
+  }
+  linked.forEach((h) => {
+    list.appendChild(
+      el(
+        "div",
+        { class: "report-card" },
+        el(
+          "div",
+          { class: "report-card-head" },
+          el("span", { class: "agenda-name-link", onclick: () => navigate("horse-profile", h.id) }, h.name)
+        ),
+        el(
+          "div",
+          { class: "profile-actions" },
+          el("button", { class: "btn btn-ghost small", onclick: () => unlinkHorseFromOwner(h) }, "Unlink")
+        )
+      )
+    );
+  });
+}
+
+async function linkHorseToOwner(owner, horseId) {
+  if (!horseId) { showToast("Choose a horse first.", true); return; }
+  const horse = state.db.horses.find((h) => h.id === horseId);
+  if (!horse) return;
+  const prevOwnerId = horse.ownerId || null;
+  horse.ownerId = owner.id;
+  try {
+    await saveDb();
+    showToast(`${horse.name} linked to ${owner.name}`);
+    renderOwnerProfile(owner.id);
+  } catch (err) {
+    horse.ownerId = prevOwnerId;
+    showToast("Couldn't link horse: " + err.message, true);
+  }
+}
+
+async function unlinkHorseFromOwner(horse) {
+  const prevOwnerId = horse.ownerId;
+  horse.ownerId = null;
+  try {
+    await saveDb();
+    showToast(`${horse.name} unlinked`);
+    renderOwnerProfile(prevOwnerId);
+  } catch (err) {
+    horse.ownerId = prevOwnerId;
+    showToast("Couldn't unlink horse: " + err.message, true);
+  }
+}
+
 function renderReportCards(horseId) {
   const list = $("#reportCardList");
   list.innerHTML = "";
@@ -1338,7 +1662,8 @@ function renderReportCards(horseId) {
     }
 
     const actions = el("div", { class: "profile-actions" });
-    if (horse && horse.ownerEmail) {
+    const cardOwner = horse ? ownerForHorse(horse) : null;
+    if (cardOwner && cardOwner.email) {
       actions.appendChild(
         el(
           "button",
@@ -1347,7 +1672,7 @@ function renderReportCards(horseId) {
         )
       );
     }
-    if (horse && horse.ownerPhone) {
+    if (cardOwner && cardOwner.phone) {
       actions.appendChild(
         el(
           "button",
@@ -1385,20 +1710,23 @@ async function deleteReportCard(horseId, cardId) {
 }
 
 function textReportCardToOwner(horse, card) {
+  const owner = ownerForHorse(horse);
+  if (!owner || !owner.phone) { showToast("No owner phone on file.", true); return; }
   let body = `${horse.name} update (${fmtDateHuman(card.date)}): ${card.summary}`;
   if (card.exercises) body += ` Exercises: ${card.exercises}`;
   body += ` — RPD Equestrian`;
-  const phone = horse.ownerPhone.replace(/[^\d+]/g, "");
+  const phone = owner.phone.replace(/[^\d+]/g, "");
   window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
 async function emailReportCardToOwner(horse, card, btn) {
-  if (!horse.ownerEmail) { showToast("No owner email on file.", true); return; }
+  const owner = ownerForHorse(horse);
+  if (!owner || !owner.email) { showToast("No owner email on file.", true); return; }
   const origText = btn ? btn.textContent : null;
   if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
 
   const subject = `Work Report for ${horse.name} — ${fmtDateHuman(card.date)}`;
-  let baseBody = `Hi ${horse.ownerName || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
+  let baseBody = `Hi ${owner.name || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
   if (card.exercises) baseBody += `\nExercises/notes: ${card.exercises}\n`;
   baseBody += `\nRidden by: ${card.rider}\n`;
 
@@ -1417,7 +1745,7 @@ async function emailReportCardToOwner(horse, card, btn) {
     }
     bodyText += `\n— RPD Equestrian`;
 
-    await gmailSendEmail({ to: horse.ownerEmail, subject, bodyText, attachments });
+    await gmailSendEmail({ to: owner.email, subject, bodyText, attachments });
     showToast(attachments.length ? `Email sent with ${attachments.length} attachment(s).` : "Email sent.");
   } catch (err) {
     console.warn("Gmail send failed, falling back to mailto", err);
@@ -1433,7 +1761,7 @@ async function emailReportCardToOwner(horse, card, btn) {
       if (links.length) fallbackBody += `\nPhotos/Videos:\n` + links.join("\n") + "\n";
     }
     fallbackBody += `\n— RPD Equestrian`;
-    window.location.href = `mailto:${encodeURIComponent(horse.ownerEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
+    window.location.href = `mailto:${encodeURIComponent(owner.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = origText || "Email to Owner"; }
   }
@@ -1667,6 +1995,7 @@ function renderStudentProfile(studentId) {
       )
     )
   );
+  const linkedOwner = ownerForStudent(student.id);
   header.appendChild(
     el(
       "div",
@@ -1674,7 +2003,10 @@ function renderStudentProfile(studentId) {
       student.contactPhone ? el("span", {}, "Phone: " + escapeHtml(student.contactPhone)) : null,
       student.contactEmail ? el("span", {}, escapeHtml(student.contactEmail)) : null,
       student.guardianName ? el("span", {}, "Guardian: " + escapeHtml(student.guardianName)) : null,
-      student.programDaysPerWeek ? el("span", {}, "Program: " + student.programDaysPerWeek + "x/week" + (student.programNotes ? " (" + escapeHtml(student.programNotes) + ")" : "")) : null
+      student.programDaysPerWeek ? el("span", {}, "Program: " + student.programDaysPerWeek + "x/week" + (student.programNotes ? " (" + escapeHtml(student.programNotes) + ")" : "")) : null,
+      linkedOwner
+        ? el("span", { class: "agenda-name-link", onclick: () => navigate("owner-profile", linkedOwner.id) }, "Owner account: " + escapeHtml(linkedOwner.name))
+        : null
     )
   );
   if (student.notes) header.appendChild(el("p", { class: "muted" }, student.notes));
