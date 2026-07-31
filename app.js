@@ -2355,6 +2355,23 @@ async function markSessionPaidNoInvoice(evt, ownerId) {
   }
 }
 
+// Reverts a mistaken "Mark Paid (no invoice)" — moves the session back to
+// Unbilled Sessions.
+async function undoMarkPaidNoInvoice(eventId, ownerId, events) {
+  const evt = (events || []).find((e) => e.id === eventId);
+  if (!evt) { showToast("Couldn't find that session.", true); return; }
+  try {
+    const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+    const newProps = Object.assign({}, props, { directPaid: "false" });
+    await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
+    await loadBillableEvents(true);
+    showToast("Moved back to unbilled");
+    if (state.currentAccountOwnerId === ownerId) renderAccountProfile(ownerId);
+  } catch (err) {
+    showToast("Couldn't update: " + err.message, true);
+  }
+}
+
 function monthKeyFromDateStr(dateStr) {
   return (dateStr || "").slice(0, 7); // "YYYY-MM"
 }
@@ -2386,6 +2403,7 @@ function renderAccountHistory(ownerId, events) {
       label: eventBillingLabel(evt),
       amount: rate,
       status: eventStatus(evt),
+      eventId: evt.id,
     });
   });
 
@@ -2438,7 +2456,14 @@ function renderAccountHistory(ownerId, events) {
             "li",
             { class: "history-item" },
             el("span", {}, fmtDateShort(e.date) + " — " + e.label + " — $" + e.amount.toFixed(2)),
-            el("span", { class: "badge " + STATUS_BADGE_CLASS[e.status] }, STATUS_LABELS[e.status])
+            el(
+              "span",
+              { style: "display: flex; align-items: center; gap: 6px;" },
+              el("span", { class: "badge " + STATUS_BADGE_CLASS[e.status] }, STATUS_LABELS[e.status]),
+              e.status === "paid_direct"
+                ? el("button", { type: "button", class: "btn btn-ghost small", onclick: () => undoMarkPaidNoInvoice(e.eventId, ownerId, events) }, "Undo")
+                : null
+            )
           )
         );
       });
