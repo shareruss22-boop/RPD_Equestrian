@@ -508,6 +508,112 @@ async function gmailSendEmail({ to, subject, bodyText, attachments }) {
   return res.json();
 }
 
+/* ---- Invoice PDFs (jsPDF, loaded via CDN in index.html) ---- */
+function buildInvoicePdfDoc(invoice, owner) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "pt", format: "letter" });
+  const info = accountContactInfo(owner);
+  const left = 40;
+  const right = 555;
+  let y = 54;
+
+  doc.setFontSize(18);
+  doc.setFont(undefined, "bold");
+  doc.text("RPD Equestrian", left, y);
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(11);
+  doc.text("Invoice", right, y, { align: "right" });
+
+  y += 28;
+  doc.setFontSize(10);
+  doc.text("Invoice date: " + fmtDateHuman(invoice.date), left, y);
+  doc.text("Status: " + (invoice.paid ? "PAID" : "UNPAID"), right, y, { align: "right" });
+
+  y += 22;
+  doc.setFont(undefined, "bold");
+  doc.text("Bill to", left, y);
+  doc.setFont(undefined, "normal");
+  y += 14;
+  doc.text(info.name || "", left, y);
+  if (info.email) { y += 14; doc.text(info.email, left, y); }
+  if (info.phone) { y += 14; doc.text(info.phone, left, y); }
+
+  y += 26;
+  doc.setFont(undefined, "bold");
+  doc.text("Description", left, y);
+  doc.text("Date", 380, y);
+  doc.text("Amount", right, y, { align: "right" });
+  doc.setFont(undefined, "normal");
+  y += 6;
+  doc.setLineWidth(0.5);
+  doc.line(left, y, right, y);
+  y += 16;
+
+  (invoice.lineItems || []).forEach((li) => {
+    if (y > 720) { doc.addPage(); y = 54; }
+    doc.text(String(li.label || ""), left, y);
+    if (li.date) doc.text(fmtDateShort(li.date), 380, y);
+    doc.text("$" + Number(li.amount).toFixed(2), right, y, { align: "right" });
+    y += 18;
+  });
+
+  y += 8;
+  doc.line(left, y, right, y);
+  y += 22;
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(12);
+  doc.text("Total: $" + Number(invoice.total).toFixed(2), right, y, { align: "right" });
+
+  return doc;
+}
+
+function invoicePdfFilename(invoice, owner) {
+  const name = accountContactInfo(owner).name.replace(/[^\w]+/g, "_");
+  return `Invoice-${name}-${invoice.date}.pdf`;
+}
+
+function downloadInvoicePdf(invoice, owner) {
+  if (!window.jspdf) { showToast("PDF library didn't load — check your connection and reload the page.", true); return; }
+  const doc = buildInvoicePdfDoc(invoice, owner);
+  doc.save(invoicePdfFilename(invoice, owner));
+}
+
+async function emailInvoicePdf(invoice, owner, btn) {
+  if (!window.jspdf) { showToast("PDF library didn't load — check your connection and reload the page.", true); return; }
+  const info = accountContactInfo(owner);
+  if (!info.email) { showToast("No email on file for this account.", true); return; }
+  const origText = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+
+  const doc = buildInvoicePdfDoc(invoice, owner);
+  const filename = invoicePdfFilename(invoice, owner);
+  const subject = `Invoice from RPD Equestrian — ${fmtDateHuman(invoice.date)}`;
+  const bodyText = `Hi ${info.name},\n\nPlease find attached your invoice dated ${fmtDateHuman(invoice.date)} for $${Number(invoice.total).toFixed(2)}.\n\nStatus: ${invoice.paid ? "Paid" : "Unpaid"}\n\n— RPD Equestrian`;
+
+  try {
+    const base64Data = doc.output("datauristring").split(",")[1];
+    await gmailSendEmail({
+      to: info.email,
+      subject,
+      bodyText,
+      attachments: [{ filename, mimeType: "application/pdf", base64Data }],
+    });
+    showToast("Invoice emailed.");
+  } catch (err) {
+    console.warn("Gmail send failed for invoice, falling back", err);
+    if (/insufficient|scope|permission|403/i.test(err.message || "")) {
+      showToast("Need permission to send email with attachments — please re-authorize, then try again.", true);
+      requestSignIn(true);
+    } else {
+      showToast("Couldn't send automatically — downloading the PDF so you can attach it manually.", true);
+    }
+    doc.save(filename);
+    window.location.href = `mailto:${encodeURIComponent(info.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(bodyText + "\n\n(Attach the downloaded invoice PDF before sending.)")}`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText || "Email Invoice"; }
+  }
+}
+
 // Downloads each media item from Drive and base64-encodes it for attaching.
 // Items over CONFIG.MAX_ATTACHMENT_BYTES or that fail to download are returned
 // in `unattached` so callers can fall back to linking them instead.
@@ -2271,6 +2377,12 @@ $("#createInvoiceBtn").addEventListener("click", async () => {
     state.db.invoices.push(invoice);
     await saveDb();
     showToast(`Invoice created — $${total.toFixed(2)}`);
+    try {
+      downloadInvoicePdf(invoice, owner);
+    } catch (pdfErr) {
+      console.warn("Invoice PDF generation failed", pdfErr);
+      showToast("Invoice saved, but the PDF couldn't be generated — use Download PDF below to retry.", true);
+    }
     state._pendingLineItems = [];
     await loadBillableEvents(true);
     renderAccountProfile(ownerId);
@@ -2287,6 +2399,7 @@ $("#createInvoiceBtn").addEventListener("click", async () => {
 function renderInvoiceHistory(ownerId) {
   const list = $("#invoiceHistoryList");
   list.innerHTML = "";
+  const owner = state.db.owners.find((o) => o.id === ownerId);
   const invoices = state.db.invoices.filter((i) => i.ownerId === ownerId).sort((a, b) => b.date.localeCompare(a.date));
   if (!invoices.length) {
     list.appendChild(el("p", { class: "empty-note" }, "No invoices yet."));
@@ -2318,7 +2431,11 @@ function renderInvoiceHistory(ownerId) {
           "button",
           { class: "btn btn-ghost small", onclick: () => toggleInvoicePaid(inv) },
           inv.paid ? "Mark Unpaid" : "Mark Paid"
-        )
+        ),
+        owner ? el("button", { class: "btn btn-ghost small", onclick: () => downloadInvoicePdf(inv, owner) }, "Download PDF") : null,
+        owner
+          ? el("button", { class: "btn btn-ghost small", onclick: (e) => emailInvoicePdf(inv, owner, e.currentTarget) }, "Email Invoice")
+          : null
       )
     );
     list.appendChild(card);
