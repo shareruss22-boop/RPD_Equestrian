@@ -156,7 +156,12 @@ state.scheduleDate = todayStr();
 
 /* ---------------- VIEW SWITCHING ---------------- */
 function showOnly(id) {
-  ["signedOutView", "loadingView", "errorView", "scheduleView", "horsesView", "horseProfileView", "studentsView", "studentProfileView"].forEach((v) => {
+  [
+    "signedOutView", "loadingView", "errorView",
+    "scheduleView", "horsesView", "horseProfileView",
+    "studentsView", "studentProfileView",
+    "accountsView", "accountProfileView",
+  ].forEach((v) => {
     $("#" + v).hidden = v !== id;
   });
 }
