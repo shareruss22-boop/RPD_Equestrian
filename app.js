@@ -44,6 +44,7 @@ const state = {
   _billableEventsCache: null,
   _pendingLineItems: [],
   _ownerModalContext: null,
+  _editingInvoiceLineItemId: null,
 };
 
 /* ---------------- UTIL ---------------- */
@@ -954,6 +955,7 @@ function navigate(view, param) {
     const resolvedId = resolveOwnerOrStudentValue(param);
     state.currentAccountOwnerId = resolvedId;
     state._pendingLineItems = [];
+    state._editingInvoiceLineItemId = null;
     showOnly("accountProfileView");
     renderAccountProfile(resolvedId);
   }
@@ -2396,6 +2398,55 @@ $("#createInvoiceBtn").addEventListener("click", async () => {
   }
 });
 
+function renderInvoiceLineItemRow(invoice, li) {
+  if (state._editingInvoiceLineItemId === li.id) {
+    const labelInput = el("input", { type: "text", value: li.label, style: "width: 45%;" });
+    const amountInput = el("input", { type: "number", value: li.amount, min: "0", step: "0.01", style: "width: 80px;" });
+    return el(
+      "li",
+      { class: "history-item" },
+      el("span", { style: "display: flex; gap: 6px; align-items: center; flex: 1;" }, labelInput, amountInput),
+      el(
+        "span",
+        { style: "display: flex; gap: 6px;" },
+        el(
+          "button",
+          { type: "button", class: "btn btn-ghost small", onclick: () => saveInvoiceLineItemEdit(invoice, li.id, labelInput.value, amountInput.value) },
+          "Save"
+        ),
+        el(
+          "button",
+          {
+            type: "button",
+            class: "btn btn-ghost small",
+            onclick: () => { state._editingInvoiceLineItemId = null; renderInvoiceHistory(invoice.ownerId); },
+          },
+          "Cancel"
+        )
+      )
+    );
+  }
+  return el(
+    "li",
+    { class: "history-item" },
+    el("span", {}, li.label + (li.date ? " (" + fmtDateShort(li.date) + ")" : "") + " — $" + Number(li.amount).toFixed(2)),
+    el(
+      "span",
+      { style: "display: flex; gap: 6px;" },
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn btn-ghost small",
+          onclick: () => { state._editingInvoiceLineItemId = li.id; renderInvoiceHistory(invoice.ownerId); },
+        },
+        "Edit"
+      ),
+      el("button", { type: "button", class: "btn btn-ghost small", onclick: () => removeInvoiceLineItem(invoice, li.id) }, "Remove")
+    )
+  );
+}
+
 function renderInvoiceHistory(ownerId) {
   const list = $("#invoiceHistoryList");
   list.innerHTML = "";
@@ -2416,11 +2467,9 @@ function renderInvoiceHistory(ownerId) {
         el("span", { class: "badge " + (inv.paid ? "paid" : "unpaid") }, inv.paid ? "Paid" : "Unpaid")
       )
     );
-    const itemsList = el("ul", { class: "muted small" });
-    inv.lineItems.forEach((li) => {
-      itemsList.appendChild(
-        el("li", {}, li.label + (li.date ? " (" + fmtDateShort(li.date) + ")" : "") + " — $" + Number(li.amount).toFixed(2))
-      );
+    const itemsList = el("ul", { class: "history-item-list" });
+    (inv.lineItems || []).forEach((li) => {
+      itemsList.appendChild(renderInvoiceLineItemRow(inv, li));
     });
     card.appendChild(itemsList);
     card.appendChild(
@@ -2435,11 +2484,17 @@ function renderInvoiceHistory(ownerId) {
         owner ? el("button", { class: "btn btn-ghost small", onclick: () => downloadInvoicePdf(inv, owner) }, "Download PDF") : null,
         owner
           ? el("button", { class: "btn btn-ghost small", onclick: (e) => emailInvoicePdf(inv, owner, e.currentTarget) }, "Email Invoice")
-          : null
+          : null,
+        el("button", { type: "button", class: "btn btn-danger small", onclick: () => deleteInvoiceEntirely(inv) }, "Delete Invoice")
       )
     );
     list.appendChild(card);
   });
+}
+
+async function refreshAccountProfileAfterInvoiceChange(ownerId) {
+  await loadBillableEvents(true);
+  if (state.currentAccountOwnerId === ownerId) renderAccountProfile(ownerId);
 }
 
 async function toggleInvoicePaid(invoice) {
@@ -2448,13 +2503,117 @@ async function toggleInvoicePaid(invoice) {
   try {
     await saveDb();
     showToast(invoice.paid ? "Marked paid" : "Marked unpaid");
-    if (state.currentAccountOwnerId === invoice.ownerId) {
-      renderInvoiceHistory(invoice.ownerId);
-      loadBillableEvents().then((events) => renderAccountHistory(invoice.ownerId, events));
-    }
+    await refreshAccountProfileAfterInvoiceChange(invoice.ownerId);
   } catch (err) {
     invoice.paid = prev;
     showToast("Couldn't update: " + err.message, true);
+  }
+}
+
+// Un-invoices the calendar event backing a session line item, restoring it
+// to "unbilled" (matches whatever the event's non-billing fields were —
+// only the invoiced/invoiceId flags are touched).
+async function unmarkEventInvoiced(eventId) {
+  const events = await loadBillableEvents();
+  const evt = events.find((e) => e.id === eventId);
+  if (!evt) return;
+  const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+  const newProps = Object.assign({}, props, { invoiced: "false" });
+  delete newProps.invoiceId;
+  await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
+}
+
+// Removes one line item from an existing invoice. If it was a session
+// (has an eventId), that session moves back to Unbilled Sessions. If it
+// was the last item on the invoice, the now-empty invoice is deleted too.
+async function removeInvoiceLineItem(invoice, lineItemId) {
+  const li = (invoice.lineItems || []).find((x) => x.id === lineItemId);
+  if (!li) return;
+  const ok = confirm(
+    `Remove "${li.label}" — $${Number(li.amount).toFixed(2)} — from this invoice?` +
+      (li.eventId ? " That session will move back to Unbilled." : "")
+  );
+  if (!ok) return;
+
+  const prevLineItems = invoice.lineItems.slice();
+  const prevTotal = invoice.total;
+  const remaining = invoice.lineItems.filter((x) => x.id !== lineItemId);
+  const willDeleteInvoice = remaining.length === 0;
+  const invIdx = state.db.invoices.findIndex((i) => i.id === invoice.id);
+
+  invoice.lineItems = remaining;
+  invoice.total = remaining.reduce((sum, x) => sum + Number(x.amount || 0), 0);
+  if (willDeleteInvoice && invIdx !== -1) state.db.invoices.splice(invIdx, 1);
+
+  try {
+    if (li.eventId) await unmarkEventInvoiced(li.eventId);
+    await saveDb();
+    state._editingInvoiceLineItemId = null;
+    showToast(willDeleteInvoice ? "Item removed — invoice deleted (no items left)" : "Item removed from invoice");
+    await refreshAccountProfileAfterInvoiceChange(invoice.ownerId);
+  } catch (err) {
+    invoice.lineItems = prevLineItems;
+    invoice.total = prevTotal;
+    if (willDeleteInvoice && invIdx !== -1) state.db.invoices.splice(invIdx, 0, invoice);
+    showToast("Couldn't remove item: " + err.message, true);
+  }
+}
+
+// Edits a line item's description/amount in place (e.g. fixing a typo or
+// applying a discount) without touching its invoiced status.
+async function saveInvoiceLineItemEdit(invoice, lineItemId, newLabelRaw, newAmountRaw) {
+  const li = invoice.lineItems.find((x) => x.id === lineItemId);
+  if (!li) return;
+  const newLabel = (newLabelRaw || "").trim();
+  const amount = Number(newAmountRaw);
+  if (!newLabel) { showToast("Enter a description.", true); return; }
+  if (isNaN(amount) || amount < 0) { showToast("Enter a valid amount.", true); return; }
+
+  const prevLabel = li.label;
+  const prevAmount = li.amount;
+  const prevTotal = invoice.total;
+  li.label = newLabel;
+  li.amount = amount;
+  invoice.total = invoice.lineItems.reduce((sum, x) => sum + Number(x.amount || 0), 0);
+
+  try {
+    await saveDb();
+    state._editingInvoiceLineItemId = null;
+    showToast("Line item updated");
+    await refreshAccountProfileAfterInvoiceChange(invoice.ownerId);
+  } catch (err) {
+    li.label = prevLabel;
+    li.amount = prevAmount;
+    invoice.total = prevTotal;
+    showToast("Couldn't save: " + err.message, true);
+  }
+}
+
+// Deletes the entire invoice and moves every session it billed back to
+// Unbilled Sessions — the "undo an invoice" button.
+async function deleteInvoiceEntirely(invoice) {
+  const ok = confirm(
+    `Delete this invoice — $${Number(invoice.total).toFixed(2)} from ${fmtDateHuman(invoice.date)}? ` +
+      `All its sessions will move back to Unbilled. This can't be undone.`
+  );
+  if (!ok) return;
+
+  const idx = state.db.invoices.findIndex((i) => i.id === invoice.id);
+  if (idx === -1) return;
+  const removed = state.db.invoices[idx];
+  state.db.invoices.splice(idx, 1);
+
+  try {
+    const sessionLineItems = (invoice.lineItems || []).filter((li) => li.eventId);
+    for (const li of sessionLineItems) {
+      await unmarkEventInvoiced(li.eventId);
+    }
+    await saveDb();
+    showToast("Invoice deleted — sessions moved back to unbilled");
+    await refreshAccountProfileAfterInvoiceChange(invoice.ownerId);
+  } catch (err) {
+    state.db.invoices.splice(idx, 0, removed);
+    showToast("Couldn't delete invoice: " + err.message, true);
   }
 }
 
