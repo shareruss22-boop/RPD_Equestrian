@@ -386,6 +386,22 @@ button, input, select, textarea {
   color: var(--green-900);
 }
 .badge.inactive { background: #e4e7e5; color: #5b6660; }
+.badge.paid { background: var(--green-200); color: var(--green-900); }
+.badge.unpaid { background: rgba(179, 67, 47, 0.15); color: var(--danger); }
+.badge.unbilled { background: rgba(185, 138, 47, 0.18); color: var(--amber); }
+
+.history-month { margin-bottom: 18px; }
+.history-item-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid #eef1ee;
+  font-size: 0.9rem;
+}
+.history-item:last-child { border-bottom: none; }
 
 /* ---------- Horse profile ---------- */
 .horse-profile-header {

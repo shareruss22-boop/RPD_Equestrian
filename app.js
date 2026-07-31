@@ -635,6 +635,23 @@ function ownerForStudent(studentId) {
   return state.db.owners.find((o) => o.studentId === studentId) || null;
 }
 
+// Single source of truth for what to *display* for an owner account. If the
+// owner is linked to a student, the student's name always wins (so renaming
+// a student — e.g. adding a last name — instantly shows up everywhere the
+// account is displayed, without needing to separately edit the owner
+// record). Email/phone stay owner-specific (a parent's contact info can
+// legitimately differ from the rider's own), but fall back to the student's
+// contact info if the owner never set their own.
+function accountContactInfo(owner) {
+  const student = owner && owner.studentId ? state.db.students.find((s) => s.id === owner.studentId) : null;
+  return {
+    student,
+    name: (student && student.name) || (owner && owner.name) || "Unnamed",
+    email: (owner && owner.email) || (student && student.contactEmail) || "",
+    phone: (owner && owner.phone) || (student && student.contactPhone) || "",
+  };
+}
+
 /* =========================================================
    BILLING — fee schedule, unbilled sessions, invoices
    ========================================================= */
@@ -704,15 +721,60 @@ function unbilledEventsForAccount(events, accountId) {
     .filter((evt) => {
       const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
       if (props.invoiced === "true") return false;
+      if (props.directPaid === "true") return false;
       return accountIdForEvent(evt) === accountId;
     })
     .sort((a, b) => eventDateStr(a).localeCompare(eventDateStr(b)));
 }
 
+// Every billable event for an account regardless of billing status — the
+// basis for the itemized monthly history (unlike unbilledEventsForAccount,
+// which only shows what's still owed).
+function allEventsForAccount(events, accountId) {
+  return events
+    .filter((evt) => accountIdForEvent(evt) === accountId)
+    .sort((a, b) => eventDateStr(a).localeCompare(eventDateStr(b)));
+}
+
+// "unbilled" | "paid_direct" | "invoiced_unpaid" | "invoiced_paid"
+function eventStatus(evt) {
+  const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+  if (props.invoiced === "true") {
+    const inv = state.db.invoices.find((i) => i.id === props.invoiceId);
+    return inv && inv.paid ? "invoiced_paid" : "invoiced_unpaid";
+  }
+  if (props.directPaid === "true") return "paid_direct";
+  return "unbilled";
+}
+
+const STATUS_LABELS = {
+  unbilled: "Unbilled",
+  paid_direct: "Paid",
+  invoiced_unpaid: "Invoiced — Unpaid",
+  invoiced_paid: "Invoiced — Paid",
+};
+const STATUS_BADGE_CLASS = {
+  unbilled: "unbilled",
+  paid_direct: "paid",
+  invoiced_unpaid: "unpaid",
+  invoiced_paid: "paid",
+};
+
 async function markEventsInvoiced(events, invoiceId) {
   for (const evt of events) {
     const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
     const newProps = Object.assign({}, props, { invoiced: "true", invoiceId });
+    await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
+  }
+}
+
+// Marks a session as settled outside the invoice system (e.g. paid cash
+// in person) — pulls it out of "unbilled" and into the account history as
+// Paid, without ever generating an invoice line item for it.
+async function markEventsDirectPaid(events) {
+  for (const evt of events) {
+    const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+    const newProps = Object.assign({}, props, { directPaid: "true" });
     await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
   }
 }
@@ -733,11 +795,12 @@ function getAllAccounts() {
   const seenStudentIds = new Set();
   state.db.students.forEach((s) => {
     const owner = ownerForStudent(s.id);
+    const info = owner ? accountContactInfo(owner) : null;
     list.push({
       accountId: owner ? owner.id : "student:" + s.id,
       name: s.name,
-      email: owner ? owner.email : s.contactEmail,
-      phone: owner ? owner.phone : s.contactPhone,
+      email: info ? info.email : s.contactEmail,
+      phone: info ? info.phone : s.contactPhone,
       rate: owner ? owner.rate : null,
       studentId: s.id,
     });
@@ -745,7 +808,8 @@ function getAllAccounts() {
   });
   state.db.owners.forEach((o) => {
     if (o.studentId && seenStudentIds.has(o.studentId)) return;
-    list.push({ accountId: o.id, name: o.name, email: o.email, phone: o.phone, rate: o.rate, studentId: o.studentId || null });
+    const info = accountContactInfo(o);
+    list.push({ accountId: o.id, name: info.name, email: info.email, phone: info.phone, rate: o.rate, studentId: o.studentId || null });
   });
   return list.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1349,8 +1413,9 @@ function fillOwnerOrStudentSelect(select, selectedValue, noneLabel) {
   if (owners.length) {
     const ownerGroup = el("optgroup", { label: "Existing owner accounts" });
     owners.forEach((o) => {
+      const info = accountContactInfo(o);
       ownerGroup.appendChild(
-        el("option", { value: o.id }, o.name + (o.studentId ? " (student)" : "") + (o.email ? " — " + o.email : ""))
+        el("option", { value: o.id }, info.name + (o.studentId ? " (student)" : "") + (info.email ? " — " + info.email : ""))
       );
     });
     select.appendChild(ownerGroup);
@@ -1591,28 +1656,44 @@ function populateOwnerStudentSelect(selectedId) {
   select.value = selectedId || "";
 }
 
+// When an owner is linked to a student, the name field locks to that
+// student's live name (editable only from the Student profile) so the two
+// records can never drift apart again — this was the root cause of names
+// not "connecting" between Students and Accounts.
+function syncOwnerNameFieldLock() {
+  const studentId = $("#ownerStudentId").value;
+  const nameInput = $("#ownerName");
+  const note = $("#ownerNameSyncNote");
+  if (studentId) {
+    const student = state.db.students.find((s) => s.id === studentId);
+    if (student) {
+      nameInput.value = student.name || "";
+      nameInput.disabled = true;
+      if (note) note.hidden = false;
+      if (!$("#ownerEmail").value.trim()) $("#ownerEmail").value = student.contactEmail || "";
+      if (!$("#ownerPhone").value.trim()) $("#ownerPhone").value = student.contactPhone || "";
+      return;
+    }
+  }
+  nameInput.disabled = false;
+  if (note) note.hidden = true;
+}
+
 function openOwnerModal(owner, opts) {
   $("#ownerModalTitle").textContent = owner ? "Edit Owner" : "Add Owner";
   $("#ownerId").value = owner ? owner.id : "";
   $("#ownerName").value = owner ? owner.name : "";
+  $("#ownerName").disabled = false;
   $("#ownerEmail").value = owner ? owner.email || "" : "";
   $("#ownerPhone").value = owner ? owner.phone || "" : "";
   $("#ownerNotes").value = owner ? owner.notes || "" : "";
   populateOwnerStudentSelect(owner ? owner.studentId || "" : "");
+  syncOwnerNameFieldLock();
   state._ownerModalContext = opts || null;
   openModal("ownerModal");
 }
 
-$("#ownerStudentId").addEventListener("change", () => {
-  const studentId = $("#ownerStudentId").value;
-  if (!studentId) return;
-  const student = state.db.students.find((s) => s.id === studentId);
-  if (!student) return;
-  // Convenience autofill — only fills blank fields, never overwrites what's already typed.
-  if (!$("#ownerName").value.trim()) $("#ownerName").value = student.name || "";
-  if (!$("#ownerEmail").value.trim()) $("#ownerEmail").value = student.contactEmail || "";
-  if (!$("#ownerPhone").value.trim()) $("#ownerPhone").value = student.contactPhone || "";
-});
+$("#ownerStudentId").addEventListener("change", syncOwnerNameFieldLock);
 
 $("#ownerForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1621,10 +1702,14 @@ $("#ownerForm").addEventListener("submit", async (e) => {
   const submitBtn = $("#ownerSubmitBtn");
   submitBtn.disabled = true;
   try {
+    const linkedStudentId = $("#ownerStudentId").value || null;
+    const linkedStudent = linkedStudentId ? state.db.students.find((s) => s.id === linkedStudentId) : null;
     const ownerData = {
       id,
-      studentId: $("#ownerStudentId").value || null,
-      name: $("#ownerName").value.trim(),
+      studentId: linkedStudentId,
+      // Name always comes from the linked student when one is set, even if
+      // the (disabled) field somehow held a different value.
+      name: linkedStudent ? linkedStudent.name : $("#ownerName").value.trim(),
       email: $("#ownerEmail").value.trim(),
       phone: $("#ownerPhone").value.trim(),
       notes: $("#ownerNotes").value.trim(),
@@ -1662,7 +1747,7 @@ $("#ownerForm").addEventListener("submit", async (e) => {
 async function deleteOwner(owner) {
   const linkedCount = state.db.horses.filter((h) => h.ownerId === owner.id).length;
   const ok = confirm(
-    `Delete ${owner.name}?` +
+    `Delete ${accountContactInfo(owner).name}?` +
       (linkedCount ? ` ${linkedCount} horse(s) will be unlinked from this owner.` : "") +
       `\n\nThis can't be undone.`
   );
@@ -1694,7 +1779,7 @@ async function linkHorseToOwner(owner, horseId) {
   horse.ownerId = owner.id;
   try {
     await saveDb();
-    showToast(`${horse.name} linked to ${owner.name}`);
+    showToast(`${horse.name} linked to ${accountContactInfo(owner).name}`);
     renderAccountProfile(owner.id);
   } catch (err) {
     horse.ownerId = prevOwnerId;
@@ -1737,7 +1822,7 @@ function renderAccounts() {
         el(
           "div",
           { class: "report-card-head" },
-          el("span", {}, o.name + " — $" + effectiveRate(o) + "/session"),
+          el("span", {}, accountContactInfo(o).name + " — $" + effectiveRate(o) + "/session"),
           el("button", { class: "btn btn-ghost small", onclick: () => removeRateOverride(o) }, "Remove")
         )
       );
@@ -1800,7 +1885,7 @@ async function renderAccountsGrid() {
         { class: "horse-card", onclick: () => navigate("account-profile", acct.accountId) },
         el("h3", {}, acct.name),
         el("p", { class: "muted small" }, unbilled.length + " unbilled session" + (unbilled.length === 1 ? "" : "s")),
-        el("p", { class: "muted small" }, "$" + owed.toFixed(2) + " owed")
+        el("span", { class: "badge " + (owed > 0 ? "unpaid" : "paid") }, owed > 0 ? "$" + owed.toFixed(2) + " owed" : "Paid up")
       )
     );
   });
@@ -1832,7 +1917,7 @@ $("#addRateOverrideBtn").addEventListener("click", async () => {
   owner.rate = amount;
   try {
     await saveDb();
-    showToast(`${owner.name}'s rate set to $${amount}`);
+    showToast(`${accountContactInfo(owner).name}'s rate set to $${amount}`);
     $("#rateOverrideAmount").value = "";
     renderAccounts();
   } catch (err) {
@@ -1846,8 +1931,33 @@ async function removeRateOverride(owner) {
   owner.rate = null;
   try {
     await saveDb();
-    showToast(`${owner.name} back to default rate`);
+    showToast(`${accountContactInfo(owner).name} back to default rate`);
     renderAccounts();
+  } catch (err) {
+    owner.rate = prevRate;
+    showToast("Couldn't save: " + err.message, true);
+  }
+}
+
+// Editable base rate right on the Account Profile page — same underlying
+// field as the Fee Schedule's rate overrides, just more convenient to
+// change from the account you're already looking at. Leaving it blank
+// clears the override and falls back to the default rate (e.g. Laken, as
+// the trainer, is set to $0 since she isn't a paying client).
+async function saveAccountRate(owner) {
+  const raw = $("#accountRateInput").value.trim();
+  const prevRate = owner.rate;
+  if (raw === "") {
+    owner.rate = null;
+  } else {
+    const amount = Number(raw);
+    if (isNaN(amount) || amount < 0) { showToast("Enter a valid rate.", true); return; }
+    owner.rate = amount;
+  }
+  try {
+    await saveDb();
+    showToast(`${accountContactInfo(owner).name}'s rate ${owner.rate == null ? "reset to default" : "set to $" + owner.rate}`);
+    renderAccountProfile(owner.id);
   } catch (err) {
     owner.rate = prevRate;
     showToast("Couldn't save: " + err.message, true);
@@ -1904,20 +2014,45 @@ async function renderAccountProfile(ownerId) {
     historyList.innerHTML = "";
     $("#accountHorseLinkRow").innerHTML = "";
     $("#accountHorseList").innerHTML = "";
+    const historyContainer = $("#accountHistoryList");
+    if (historyContainer) historyContainer.innerHTML = "";
     return;
   }
 
   const linkedStudent = owner.studentId ? state.db.students.find((s) => s.id === owner.studentId) : null;
+  const info = accountContactInfo(owner);
   header.innerHTML = "";
-  header.appendChild(el("div", { class: "profile-title-row" }, el("div", {}, el("h1", {}, owner.name))));
+  header.appendChild(el("div", { class: "profile-title-row" }, el("div", {}, el("h1", {}, info.name))));
   header.appendChild(
     el(
       "div",
       { class: "profile-meta" },
-      owner.email ? el("span", {}, escapeHtml(owner.email)) : null,
-      owner.phone ? el("span", {}, escapeHtml(owner.phone)) : null,
-      el("span", {}, "Rate: $" + effectiveRate(owner) + "/session" + (owner.rate != null && owner.rate !== "" ? " (custom)" : " (default)")),
+      info.email ? el("span", {}, escapeHtml(info.email)) : null,
+      info.phone ? el("span", {}, escapeHtml(info.phone)) : null,
       linkedStudent ? el("span", { class: "agenda-name-link", onclick: () => navigate("student-profile", linkedStudent.id) }, "Student: " + escapeHtml(linkedStudent.name)) : null
+    )
+  );
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-meta", style: "align-items: center;" },
+      el("label", { for: "accountRateInput" }, "Base rate: $"),
+      el("input", {
+        type: "number",
+        id: "accountRateInput",
+        min: "0",
+        step: "0.01",
+        value: owner.rate != null && owner.rate !== "" ? owner.rate : "",
+        placeholder: String(Number(state.db.billing.defaultRate) || 50),
+        style: "width: 80px;",
+      }),
+      el("span", { class: "muted small" }, "/session"),
+      el("button", { class: "btn btn-ghost small", onclick: () => saveAccountRate(owner) }, "Save Rate"),
+      el(
+        "span",
+        { class: "muted small" },
+        owner.rate != null && owner.rate !== "" ? "Custom rate" : "Using default ($" + (Number(state.db.billing.defaultRate) || 50) + ")"
+      )
     )
   );
   if (owner.notes) header.appendChild(el("p", { class: "muted" }, owner.notes));
@@ -1980,7 +2115,13 @@ async function renderAccountProfile(ownerId) {
   state._currentUnbilledEvents = unbilled;
   const rate = effectiveRate(owner);
   const owed = unbilled.length * rate + unpaidInvoiceTotalForAccount(ownerId);
-  header.appendChild(el("p", { style: "font-weight: 600;" }, "Amount owed: $" + owed.toFixed(2)));
+  header.appendChild(
+    el(
+      "p",
+      {},
+      el("span", { class: "badge " + (owed > 0 ? "unpaid" : "paid"), style: "font-size: 0.95rem; padding: 5px 14px;" }, owed > 0 ? "$" + owed.toFixed(2) + " owed" : "Paid up — $0.00 owed")
+    )
+  );
 
   sessionsList.innerHTML = "";
   if (!unbilled.length) {
@@ -1989,17 +2130,26 @@ async function renderAccountProfile(ownerId) {
     unbilled.forEach((evt) => {
       sessionsList.appendChild(
         el(
-          "label",
-          { class: "checkbox-label", style: "display: flex; margin-bottom: 6px;" },
-          el("input", {
-            type: "checkbox",
-            checked: "checked",
-            class: "invoice-session-checkbox",
-            "data-event-id": evt.id,
-            "data-amount": String(rate),
-            onchange: recalcInvoiceTotal,
-          }),
-          fmtDateShort(eventDateStr(evt)) + " — " + eventBillingLabel(evt) + " — $" + rate.toFixed(2)
+          "div",
+          { class: "checkbox-label", style: "display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px;" },
+          el(
+            "label",
+            { style: "display: flex; align-items: center; gap: 8px; flex: 1;" },
+            el("input", {
+              type: "checkbox",
+              checked: "checked",
+              class: "invoice-session-checkbox",
+              "data-event-id": evt.id,
+              "data-amount": String(rate),
+              onchange: recalcInvoiceTotal,
+            }),
+            fmtDateShort(eventDateStr(evt)) + " — " + eventBillingLabel(evt) + " — $" + rate.toFixed(2)
+          ),
+          el(
+            "button",
+            { type: "button", class: "btn btn-ghost small", onclick: () => markSessionPaidNoInvoice(evt, ownerId) },
+            "Mark Paid (no invoice)"
+          )
         )
       );
     });
@@ -2007,6 +2157,7 @@ async function renderAccountProfile(ownerId) {
 
   renderPendingLineItems();
   renderInvoiceHistory(ownerId);
+  renderAccountHistory(ownerId, events);
   recalcInvoiceTotal();
 }
 
@@ -2149,7 +2300,7 @@ function renderInvoiceHistory(ownerId) {
         { class: "report-card-head" },
         el("div", { class: "report-card-date" }, fmtDateHuman(inv.date)),
         el("div", { class: "report-card-rider" }, "$" + Number(inv.total).toFixed(2)),
-        el("span", { class: "badge" + (inv.paid ? "" : " inactive") }, inv.paid ? "Paid" : "Unpaid")
+        el("span", { class: "badge " + (inv.paid ? "paid" : "unpaid") }, inv.paid ? "Paid" : "Unpaid")
       )
     );
     const itemsList = el("ul", { class: "muted small" });
@@ -2180,11 +2331,120 @@ async function toggleInvoicePaid(invoice) {
   try {
     await saveDb();
     showToast(invoice.paid ? "Marked paid" : "Marked unpaid");
-    if (state.currentAccountOwnerId === invoice.ownerId) renderInvoiceHistory(invoice.ownerId);
+    if (state.currentAccountOwnerId === invoice.ownerId) {
+      renderInvoiceHistory(invoice.ownerId);
+      loadBillableEvents().then((events) => renderAccountHistory(invoice.ownerId, events));
+    }
   } catch (err) {
     invoice.paid = prev;
     showToast("Couldn't update: " + err.message, true);
   }
+}
+
+// Settles a single unbilled session outside the invoice system (e.g. paid
+// cash in person) — it disappears from "Unbilled Sessions" and shows up in
+// the Account History below as Paid, with no invoice ever generated.
+async function markSessionPaidNoInvoice(evt, ownerId) {
+  try {
+    await markEventsDirectPaid([evt]);
+    await loadBillableEvents(true);
+    showToast("Marked paid — moved to account history");
+    if (state.currentAccountOwnerId === ownerId) renderAccountProfile(ownerId);
+  } catch (err) {
+    showToast("Couldn't update: " + err.message, true);
+  }
+}
+
+function monthKeyFromDateStr(dateStr) {
+  return (dateStr || "").slice(0, 7); // "YYYY-MM"
+}
+
+function monthLabelFromKey(key) {
+  const parts = key.split("-");
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  if (!y || !m) return key || "Unknown month";
+  return new Date(y, m - 1, 1).toLocaleString("en-US", { month: "long", year: "numeric" });
+}
+
+// Itemized ledger for the account, grouped by month, covering every
+// session and fee regardless of whether it was ever invoiced — so nothing
+// falls through the cracks between "unbilled," "paid directly," and
+// "invoiced" bookkeeping.
+function renderAccountHistory(ownerId, events) {
+  const container = $("#accountHistoryList");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const owner = state.db.owners.find((o) => o.id === ownerId);
+  const rate = owner ? effectiveRate(owner) : 0;
+  const entries = [];
+
+  allEventsForAccount(events, ownerId).forEach((evt) => {
+    entries.push({
+      date: eventDateStr(evt),
+      label: eventBillingLabel(evt),
+      amount: rate,
+      status: eventStatus(evt),
+    });
+  });
+
+  state.db.invoices
+    .filter((inv) => inv.ownerId === ownerId)
+    .forEach((inv) => {
+      (inv.lineItems || [])
+        .filter((li) => !li.eventId) // session line items are already covered via the event above
+        .forEach((li) => {
+          entries.push({
+            date: li.date || inv.date,
+            label: li.label,
+            amount: Number(li.amount) || 0,
+            status: inv.paid ? "invoiced_paid" : "invoiced_unpaid",
+          });
+        });
+    });
+
+  if (!entries.length) {
+    container.appendChild(el("p", { class: "empty-note" }, "No billing history yet."));
+    return;
+  }
+
+  entries.sort((a, b) => b.date.localeCompare(a.date));
+  const groups = {};
+  entries.forEach((e) => {
+    const key = monthKeyFromDateStr(e.date);
+    (groups[key] = groups[key] || []).push(e);
+  });
+
+  Object.keys(groups)
+    .sort()
+    .reverse()
+    .forEach((key) => {
+      const items = groups[key];
+      const subtotal = items.reduce((sum, e) => sum + e.amount, 0);
+      const monthBlock = el("div", { class: "history-month" });
+      monthBlock.appendChild(
+        el(
+          "div",
+          { class: "report-card-head" },
+          el("h4", { style: "margin: 0;" }, monthLabelFromKey(key)),
+          el("span", { class: "muted small" }, "$" + subtotal.toFixed(2))
+        )
+      );
+      const ul = el("ul", { class: "history-item-list" });
+      items.forEach((e) => {
+        ul.appendChild(
+          el(
+            "li",
+            { class: "history-item" },
+            el("span", {}, fmtDateShort(e.date) + " — " + e.label + " — $" + e.amount.toFixed(2)),
+            el("span", { class: "badge " + STATUS_BADGE_CLASS[e.status] }, STATUS_LABELS[e.status])
+          )
+        );
+      });
+      monthBlock.appendChild(ul);
+      container.appendChild(monthBlock);
+    });
 }
 
 function renderReportCards(horseId) {
@@ -2277,22 +2537,24 @@ async function deleteReportCard(horseId, cardId) {
 
 function textReportCardToOwner(horse, card) {
   const owner = ownerForHorse(horse);
-  if (!owner || !owner.phone) { showToast("No owner phone on file.", true); return; }
+  const info = owner ? accountContactInfo(owner) : null;
+  if (!info || !info.phone) { showToast("No owner phone on file.", true); return; }
   let body = `${horse.name} update (${fmtDateHuman(card.date)}): ${card.summary}`;
   if (card.exercises) body += ` Exercises: ${card.exercises}`;
   body += ` — RPD Equestrian`;
-  const phone = owner.phone.replace(/[^\d+]/g, "");
+  const phone = info.phone.replace(/[^\d+]/g, "");
   window.location.href = `sms:${phone}?body=${encodeURIComponent(body)}`;
 }
 
 async function emailReportCardToOwner(horse, card, btn) {
   const owner = ownerForHorse(horse);
-  if (!owner || !owner.email) { showToast("No owner email on file.", true); return; }
+  const info = owner ? accountContactInfo(owner) : null;
+  if (!info || !info.email) { showToast("No owner email on file.", true); return; }
   const origText = btn ? btn.textContent : null;
   if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
 
   const subject = `Work Report for ${horse.name} — ${fmtDateHuman(card.date)}`;
-  let baseBody = `Hi ${owner.name || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
+  let baseBody = `Hi ${info.name || ""},\n\nHere's what ${horse.name} worked on:\n\n${card.summary}\n`;
   if (card.exercises) baseBody += `\nExercises/notes: ${card.exercises}\n`;
   baseBody += `\nRidden by: ${card.rider}\n`;
 
@@ -2311,7 +2573,7 @@ async function emailReportCardToOwner(horse, card, btn) {
     }
     bodyText += `\n— RPD Equestrian`;
 
-    await gmailSendEmail({ to: owner.email, subject, bodyText, attachments });
+    await gmailSendEmail({ to: info.email, subject, bodyText, attachments });
     showToast(attachments.length ? `Email sent with ${attachments.length} attachment(s).` : "Email sent.");
   } catch (err) {
     console.warn("Gmail send failed, falling back to mailto", err);
@@ -2327,7 +2589,7 @@ async function emailReportCardToOwner(horse, card, btn) {
       if (links.length) fallbackBody += `\nPhotos/Videos:\n` + links.join("\n") + "\n";
     }
     fallbackBody += `\n— RPD Equestrian`;
-    window.location.href = `mailto:${encodeURIComponent(owner.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
+    window.location.href = `mailto:${encodeURIComponent(info.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(fallbackBody)}`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = origText || "Email to Owner"; }
   }

@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>RPD Equestrian</title>
-<link rel="stylesheet" href="styles.css?v=17" />
+<link rel="stylesheet" href="styles.css?v=18" />
 </head>
 <body>
 
@@ -206,6 +206,12 @@
         <h2>Invoice History</h2>
       </div>
       <div id="invoiceHistoryList" class="report-card-list"></div>
+
+      <div class="view-header">
+        <h2>Account History</h2>
+      </div>
+      <p class="muted small">Every session and fee for this account, grouped by month — unbilled, paid directly, and invoiced (paid or not).</p>
+      <div id="accountHistoryList"></div>
     </section>
   </main>
 
@@ -425,6 +431,7 @@
           </select>
         </label>
         <label>Name *<input type="text" id="ownerName" required /></label>
+        <p id="ownerNameSyncNote" class="muted small" hidden>Synced from the linked student — edit their name on the Student profile.</p>
         <div class="form-row">
           <label>Email<input type="email" id="ownerEmail" /></label>
           <label>Phone<input type="tel" id="ownerPhone" placeholder="e.g. 555-123-4567" /></label>
@@ -441,6 +448,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js?v=17"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>
