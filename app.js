@@ -28,11 +28,12 @@ const state = {
   mediaFolderId: null,
   profilesFolderId: null,
   dbFileId: null,
-  db: { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [] },
+  db: { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [], billing: { defaultRate: 50, feeCatalog: [] }, invoices: [] },
   currentView: "schedule",
   currentHorseId: null,
   currentStudentId: null,
   currentOwnerId: null,
+  currentAccountOwnerId: null,
   editingReportCardId: null,
   editingLessonLogId: null,
   editingSessionEventId: null,
@@ -40,6 +41,8 @@ const state = {
   horseFilter: "active",
   studentFilter: "active",
   scheduleDate: null, // set once utils are defined
+  _billableEventsCache: null,
+  _pendingLineItems: [],
   _ownerModalContext: null,
 };
 
@@ -547,7 +550,7 @@ async function bootstrapData() {
     const q = `name='${CONFIG.DB_FILE_NAME}' and '${state.appFolderId}' in parents and trashed=false`;
     let dbFile = await driveFindOne(q);
     if (!dbFile) {
-      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [] });
+      dbFile = await driveCreateJsonFile(CONFIG.DB_FILE_NAME, state.appFolderId, { horses: [], reportCards: [], students: [], lessonLogs: [], owners: [], billing: { defaultRate: 50, feeCatalog: [] }, invoices: [] });
     }
     state.dbFileId = dbFile.id;
 
@@ -558,6 +561,10 @@ async function bootstrapData() {
     if (!state.db.students) state.db.students = [];
     if (!state.db.lessonLogs) state.db.lessonLogs = [];
     if (!state.db.owners) state.db.owners = [];
+    if (!state.db.billing) state.db.billing = { defaultRate: 50, feeCatalog: [] };
+    if (state.db.billing.defaultRate == null) state.db.billing.defaultRate = 50;
+    if (!state.db.billing.feeCatalog) state.db.billing.feeCatalog = [];
+    if (!state.db.invoices) state.db.invoices = [];
 
     const migratedOwners = migrateOwnersFromHorses();
     if (migratedOwners) await saveDb();
@@ -600,6 +607,7 @@ function migrateOwnersFromHorses() {
         name: h.ownerName || h.ownerEmail || h.ownerPhone || "Unnamed Owner",
         email: h.ownerEmail || "",
         phone: h.ownerPhone || "",
+        rate: null,
         notes: "",
         createdAt: new Date().toISOString(),
       };
@@ -620,6 +628,78 @@ function ownerForHorse(horse) {
 // so billing/contact info can be shared instead of duplicated.
 function ownerForStudent(studentId) {
   return state.db.owners.find((o) => o.studentId === studentId) || null;
+}
+
+/* =========================================================
+   BILLING — fee schedule, unbilled sessions, invoices
+   ========================================================= */
+function effectiveRate(owner) {
+  const r = owner && owner.rate;
+  if (r != null && r !== "" && !isNaN(Number(r))) return Number(r);
+  return Number(state.db.billing.defaultRate) || 50;
+}
+
+// Work sessions bill to the horse's owner; lessons bill to the student's
+// owner account (even if the lesson horse belongs to someone else, e.g. a
+// barn school horse) — since it's the student's family being billed for
+// instruction time either way.
+function ownerIdForEvent(evt) {
+  const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+  if (props.type === "lesson" && props.studentId) {
+    const o = ownerForStudent(props.studentId);
+    return o ? o.id : null;
+  }
+  if (props.type === "work" && props.horseId) {
+    const horse = state.db.horses.find((h) => h.id === props.horseId);
+    const o = horse ? ownerForHorse(horse) : null;
+    return o ? o.id : null;
+  }
+  return null;
+}
+
+function eventBillingLabel(evt) {
+  const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+  if (props.type === "lesson") {
+    return "Lesson — " + (props.studentName || "?") + (props.horseName ? " on " + props.horseName : "");
+  }
+  return "Work Session — " + (props.horseName || "?");
+}
+
+function eventDateStr(evt) {
+  const iso = evt.start.dateTime || evt.start.date + "T12:00:00Z";
+  return nyDateStringFromISO(iso);
+}
+
+// Completed calendar events are the source of truth for what's billable.
+// Fetches a wide historical window (client-side filtered for "not yet
+// invoiced") rather than paginating — fine for a single small barn's volume.
+async function loadBillableEvents(forceRefresh) {
+  if (!forceRefresh && state._billableEventsCache && Date.now() - state._billableEventsCache.at < 60000) {
+    return state._billableEventsCache.events;
+  }
+  const timeMin = "2015-01-01T00:00:00Z";
+  const timeMax = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+  const events = await calendarListEvents(timeMin, timeMax, { privateExtendedProperty: "completed=true" });
+  state._billableEventsCache = { at: Date.now(), events };
+  return events;
+}
+
+function unbilledEventsForOwner(events, ownerId) {
+  return events
+    .filter((evt) => {
+      const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+      if (props.invoiced === "true") return false;
+      return ownerIdForEvent(evt) === ownerId;
+    })
+    .sort((a, b) => eventDateStr(a).localeCompare(eventDateStr(b)));
+}
+
+async function markEventsInvoiced(events, invoiceId) {
+  for (const evt of events) {
+    const props = (evt.extendedProperties && evt.extendedProperties.private) || {};
+    const newProps = Object.assign({}, props, { invoiced: "true", invoiceId });
+    await calendarPatchEvent(evt.id, { extendedProperties: { private: newProps } });
+  }
 }
 
 /* =========================================================
@@ -653,6 +733,14 @@ function navigate(view, param) {
     state.currentOwnerId = param;
     showOnly("ownerProfileView");
     renderOwnerProfile(param);
+  } else if (view === "accounts") {
+    showOnly("accountsView");
+    renderAccounts();
+  } else if (view === "account-profile") {
+    state.currentAccountOwnerId = param;
+    state._pendingLineItems = [];
+    showOnly("accountProfileView");
+    renderAccountProfile(param);
   }
 }
 
@@ -1201,17 +1289,16 @@ function openHorseModal(horse) {
 
 $("#addHorseBtn").addEventListener("click", () => openHorseModal(null));
 
-// The owner select doubles as a direct "put this horse on the same account
-// as..." picker: existing owner accounts show up as-is, and any student who
-// doesn't already have an owner account shows up too (prefixed "student:" in
-// its option value) — picking one silently creates a lightweight owner
-// account for that student on save, no separate "add owner" step needed.
-// The "+ New Owner" button is only for owners who are NOT students.
-function populateOwnerSelect(selectedId) {
-  const select = $("#horseOwnerId");
+// Shared by the horse-modal "Owner/Lessor" picker and the Fee Schedule's
+// rate-override picker: lists existing owner accounts plus any student who
+// doesn't have one yet (value "student:<id>") so you can put a horse — or a
+// custom rate — directly on a student's account with no separate "add
+// owner" step. Selecting a student resolves to a real owner id on save via
+// resolveOwnerOrStudentValue(), which creates one on the fly if needed.
+function fillOwnerOrStudentSelect(select, selectedValue, noneLabel) {
   if (!select) return;
   select.innerHTML = "";
-  select.appendChild(el("option", { value: "" }, "— No owner linked —"));
+  if (noneLabel) select.appendChild(el("option", { value: "" }, noneLabel));
 
   const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
   if (owners.length) {
@@ -1236,7 +1323,11 @@ function populateOwnerSelect(selectedId) {
     select.appendChild(studentGroup);
   }
 
-  select.value = selectedId || "";
+  select.value = selectedValue || "";
+}
+
+function populateOwnerSelect(selectedId) {
+  fillOwnerOrStudentSelect($("#horseOwnerId"), selectedId, "— No owner linked —");
 }
 
 // Reuses a student's existing owner account if they already have one
@@ -1253,11 +1344,24 @@ function getOrCreateOwnerForStudent(studentId) {
     name: student.name,
     email: student.contactEmail || "",
     phone: student.contactPhone || "",
+    rate: null,
     notes: "",
     createdAt: new Date().toISOString(),
   };
   state.db.owners.push(owner);
   return owner;
+}
+
+// Resolves the value of any select populated by fillOwnerOrStudentSelect
+// into a real owner id, creating the owner account if a "student:<id>"
+// option was chosen.
+function resolveOwnerOrStudentValue(value) {
+  if (!value) return null;
+  if (value.startsWith("student:")) {
+    const owner = getOrCreateOwnerForStudent(value.slice("student:".length));
+    return owner ? owner.id : null;
+  }
+  return value;
 }
 
 const horseAddOwnerBtnEl = $("#horseAddOwnerBtn");
@@ -1289,11 +1393,7 @@ $("#horseForm").addEventListener("submit", async (e) => {
       };
     }
 
-    let ownerSelectVal = $("#horseOwnerId").value || null;
-    if (ownerSelectVal && ownerSelectVal.startsWith("student:")) {
-      const owner = getOrCreateOwnerForStudent(ownerSelectVal.slice("student:".length));
-      ownerSelectVal = owner ? owner.id : null;
-    }
+    const ownerSelectVal = resolveOwnerOrStudentValue($("#horseOwnerId").value);
 
     const horseData = {
       id,
@@ -1586,6 +1686,7 @@ function renderOwnerProfile(ownerId) {
       { class: "profile-meta" },
       owner.email ? el("span", {}, escapeHtml(owner.email)) : null,
       owner.phone ? el("span", {}, escapeHtml(owner.phone)) : null,
+      el("span", {}, "Rate: $" + effectiveRate(owner) + "/session" + (owner.rate != null && owner.rate !== "" ? " (custom)" : "")),
       linkedStudent
         ? el("span", { class: "agenda-name-link", onclick: () => navigate("student-profile", linkedStudent.id) }, "Also a student: " + escapeHtml(linkedStudent.name))
         : null
@@ -1596,6 +1697,7 @@ function renderOwnerProfile(ownerId) {
     el(
       "div",
       { class: "profile-actions" },
+      el("button", { class: "btn btn-ghost small", onclick: () => navigate("account-profile", owner.id) }, "View Billing Account"),
       el("button", { class: "btn btn-ghost small", onclick: () => openOwnerModal(owner) }, "Edit Info"),
       el("button", { class: "btn btn-danger small", onclick: () => deleteOwner(owner) }, "Delete Owner")
     )
@@ -1672,6 +1774,406 @@ async function unlinkHorseFromOwner(horse) {
     horse.ownerId = prevOwnerId;
     showToast("Couldn't unlink horse: " + err.message, true);
   }
+}
+
+/* =========================================================
+   ACCOUNTS — fee schedule + per-owner balances & invoices
+   ========================================================= */
+function renderAccounts() {
+  $("#defaultRateInput").value = state.db.billing.defaultRate;
+
+  const overridesList = $("#rateOverridesList");
+  overridesList.innerHTML = "";
+  const overridden = state.db.owners
+    .filter((o) => o.rate != null && o.rate !== "")
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (!overridden.length) {
+    overridesList.appendChild(el("p", { class: "muted small" }, "No custom rates yet — everyone bills at the default rate."));
+  } else {
+    overridden.forEach((o) => {
+      overridesList.appendChild(
+        el(
+          "div",
+          { class: "report-card-head" },
+          el("span", {}, o.name + " — $" + effectiveRate(o) + "/session"),
+          el("button", { class: "btn btn-ghost small", onclick: () => removeRateOverride(o) }, "Remove")
+        )
+      );
+    });
+  }
+  fillOwnerOrStudentSelect($("#rateOverrideOwnerSelect"), "", "— Choose owner or student —");
+
+  const catalogList = $("#feeCatalogList");
+  catalogList.innerHTML = "";
+  const fees = state.db.billing.feeCatalog || [];
+  if (!fees.length) {
+    catalogList.appendChild(el("p", { class: "muted small" }, "No extra fees defined yet."));
+  } else {
+    fees.forEach((f) => {
+      catalogList.appendChild(
+        el(
+          "div",
+          { class: "report-card-head" },
+          el("span", {}, f.name + " — $" + Number(f.amount).toFixed(2)),
+          el("button", { class: "btn btn-ghost small", onclick: () => removeFeeCatalogItem(f) }, "Remove")
+        )
+      );
+    });
+  }
+
+  renderAccountsGrid();
+}
+
+async function renderAccountsGrid() {
+  const grid = $("#accountsGrid");
+  grid.innerHTML = "";
+  grid.appendChild(el("p", { class: "empty-note" }, "Loading balances…"));
+
+  const owners = state.db.owners.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (!owners.length) {
+    grid.innerHTML = "";
+    grid.appendChild(el("p", { class: "empty-note" }, "No owner accounts yet — link one from a horse or the Owners page."));
+    return;
+  }
+
+  let events;
+  try {
+    events = await loadBillableEvents();
+  } catch (err) {
+    grid.innerHTML = "";
+    grid.appendChild(el("p", { class: "empty-note" }, "Couldn't load session history: " + err.message));
+    return;
+  }
+  if (state.currentView !== "accounts") return;
+
+  grid.innerHTML = "";
+  owners.forEach((o) => {
+    const unbilled = unbilledEventsForOwner(events, o.id);
+    const total = unbilled.length * effectiveRate(o);
+    grid.appendChild(
+      el(
+        "div",
+        { class: "horse-card", onclick: () => navigate("account-profile", o.id) },
+        el("h3", {}, o.name),
+        el("p", { class: "muted small" }, unbilled.length + " unbilled session" + (unbilled.length === 1 ? "" : "s")),
+        el("p", { class: "muted small" }, "$" + total.toFixed(2) + " owed")
+      )
+    );
+  });
+}
+
+$("#saveDefaultRateBtn").addEventListener("click", async () => {
+  const val = Number($("#defaultRateInput").value);
+  if (isNaN(val) || val < 0) { showToast("Enter a valid rate.", true); return; }
+  const prev = state.db.billing.defaultRate;
+  state.db.billing.defaultRate = val;
+  try {
+    await saveDb();
+    showToast("Default rate saved");
+    renderAccounts();
+  } catch (err) {
+    state.db.billing.defaultRate = prev;
+    showToast("Couldn't save: " + err.message, true);
+  }
+});
+
+$("#addRateOverrideBtn").addEventListener("click", async () => {
+  const ownerId = resolveOwnerOrStudentValue($("#rateOverrideOwnerSelect").value);
+  const amount = Number($("#rateOverrideAmount").value);
+  if (!ownerId) { showToast("Choose an owner or student first.", true); return; }
+  if (isNaN(amount) || amount < 0) { showToast("Enter a valid rate.", true); return; }
+  const owner = state.db.owners.find((o) => o.id === ownerId);
+  if (!owner) { showToast("Owner not found.", true); return; }
+  const prevRate = owner.rate;
+  owner.rate = amount;
+  try {
+    await saveDb();
+    showToast(`${owner.name}'s rate set to $${amount}`);
+    $("#rateOverrideAmount").value = "";
+    renderAccounts();
+  } catch (err) {
+    owner.rate = prevRate;
+    showToast("Couldn't save: " + err.message, true);
+  }
+});
+
+async function removeRateOverride(owner) {
+  const prevRate = owner.rate;
+  owner.rate = null;
+  try {
+    await saveDb();
+    showToast(`${owner.name} back to default rate`);
+    renderAccounts();
+  } catch (err) {
+    owner.rate = prevRate;
+    showToast("Couldn't save: " + err.message, true);
+  }
+}
+
+$("#addFeeCatalogBtn").addEventListener("click", async () => {
+  const name = $("#newFeeName").value.trim();
+  const amount = Number($("#newFeeAmount").value);
+  if (!name) { showToast("Enter a fee name.", true); return; }
+  if (isNaN(amount) || amount < 0) { showToast("Enter a valid amount.", true); return; }
+  const fee = { id: uuid(), name, amount };
+  state.db.billing.feeCatalog.push(fee);
+  try {
+    await saveDb();
+    showToast("Fee added");
+    $("#newFeeName").value = "";
+    $("#newFeeAmount").value = "";
+    renderAccounts();
+  } catch (err) {
+    state.db.billing.feeCatalog.pop();
+    showToast("Couldn't save: " + err.message, true);
+  }
+});
+
+async function removeFeeCatalogItem(fee) {
+  const idx = state.db.billing.feeCatalog.findIndex((f) => f.id === fee.id);
+  if (idx === -1) return;
+  const removed = state.db.billing.feeCatalog[idx];
+  state.db.billing.feeCatalog.splice(idx, 1);
+  try {
+    await saveDb();
+    showToast("Fee removed");
+    renderAccounts();
+  } catch (err) {
+    state.db.billing.feeCatalog.splice(idx, 0, removed);
+    showToast("Couldn't save: " + err.message, true);
+  }
+}
+
+/* ---- Individual account page: unbilled sessions + line items + invoices ---- */
+$("#backToAccountsBtn").addEventListener("click", () => navigate("accounts"));
+
+async function renderAccountProfile(ownerId) {
+  const owner = state.db.owners.find((o) => o.id === ownerId);
+  const header = $("#accountProfileHeader");
+  const sessionsList = $("#unbilledSessionsList");
+  const historyList = $("#invoiceHistoryList");
+
+  if (!owner) {
+    header.innerHTML = "<p>Account not found.</p>";
+    sessionsList.innerHTML = "";
+    $("#pendingLineItemsList").innerHTML = "";
+    historyList.innerHTML = "";
+    return;
+  }
+
+  const linkedStudent = owner.studentId ? state.db.students.find((s) => s.id === owner.studentId) : null;
+  header.innerHTML = "";
+  header.appendChild(el("div", { class: "profile-title-row" }, el("div", {}, el("h1", {}, owner.name))));
+  header.appendChild(
+    el(
+      "div",
+      { class: "profile-meta" },
+      owner.email ? el("span", {}, escapeHtml(owner.email)) : null,
+      owner.phone ? el("span", {}, escapeHtml(owner.phone)) : null,
+      el("span", {}, "Rate: $" + effectiveRate(owner) + "/session" + (owner.rate != null && owner.rate !== "" ? " (custom)" : " (default)")),
+      linkedStudent ? el("span", { class: "agenda-name-link", onclick: () => navigate("student-profile", linkedStudent.id) }, "Student: " + escapeHtml(linkedStudent.name)) : null
+    )
+  );
+  header.appendChild(
+    el("div", { class: "profile-actions" }, el("button", { class: "btn btn-ghost small", onclick: () => navigate("owner-profile", owner.id) }, "Edit Owner Info"))
+  );
+
+  sessionsList.innerHTML = "";
+  sessionsList.appendChild(el("p", { class: "empty-note" }, "Loading sessions…"));
+
+  let events;
+  try {
+    events = await loadBillableEvents();
+  } catch (err) {
+    sessionsList.innerHTML = "";
+    sessionsList.appendChild(el("p", { class: "empty-note" }, "Couldn't load session history: " + err.message));
+    return;
+  }
+  if (state.currentAccountOwnerId !== ownerId) return; // navigated away while loading
+
+  const unbilled = unbilledEventsForOwner(events, ownerId);
+  state._currentUnbilledEvents = unbilled;
+  const rate = effectiveRate(owner);
+
+  sessionsList.innerHTML = "";
+  if (!unbilled.length) {
+    sessionsList.appendChild(el("p", { class: "empty-note" }, "No unbilled sessions."));
+  } else {
+    unbilled.forEach((evt) => {
+      sessionsList.appendChild(
+        el(
+          "label",
+          { class: "checkbox-label", style: "display: flex; margin-bottom: 6px;" },
+          el("input", {
+            type: "checkbox",
+            checked: "checked",
+            class: "invoice-session-checkbox",
+            "data-event-id": evt.id,
+            "data-amount": String(rate),
+            onchange: recalcInvoiceTotal,
+          }),
+          fmtDateShort(eventDateStr(evt)) + " — " + eventBillingLabel(evt) + " — $" + rate.toFixed(2)
+        )
+      );
+    });
+  }
+
+  renderPendingLineItems();
+  renderInvoiceHistory(ownerId);
+  recalcInvoiceTotal();
+}
+
+function recalcInvoiceTotal() {
+  let total = 0;
+  document.querySelectorAll(".invoice-session-checkbox").forEach((cb) => {
+    if (cb.checked) total += Number(cb.dataset.amount || 0);
+  });
+  state._pendingLineItems.forEach((item) => { total += Number(item.amount) || 0; });
+  const label = $("#invoiceTotalLabel");
+  if (label) label.textContent = "Total: $" + total.toFixed(2);
+}
+
+function renderPendingLineItems() {
+  const list = $("#pendingLineItemsList");
+  list.innerHTML = "";
+  if (!state._pendingLineItems.length) {
+    list.appendChild(el("p", { class: "muted small" }, "No additional line items added yet."));
+  } else {
+    state._pendingLineItems.forEach((item) => {
+      list.appendChild(
+        el(
+          "div",
+          { class: "report-card-head" },
+          el("span", {}, item.label + " — $" + Number(item.amount).toFixed(2)),
+          el("button", { class: "btn btn-ghost small", onclick: () => removePendingLineItem(item.id) }, "Remove")
+        )
+      );
+    });
+  }
+
+  const select = $("#pendingFeeCatalogSelect");
+  select.innerHTML = "";
+  select.appendChild(el("option", { value: "" }, "— Custom item —"));
+  (state.db.billing.feeCatalog || []).forEach((f) => {
+    select.appendChild(el("option", { value: f.id }, f.name + " ($" + Number(f.amount).toFixed(2) + ")"));
+  });
+}
+
+function removePendingLineItem(id) {
+  state._pendingLineItems = state._pendingLineItems.filter((i) => i.id !== id);
+  renderPendingLineItems();
+  recalcInvoiceTotal();
+}
+
+$("#pendingFeeCatalogSelect").addEventListener("change", () => {
+  const feeId = $("#pendingFeeCatalogSelect").value;
+  if (!feeId) return;
+  const fee = (state.db.billing.feeCatalog || []).find((f) => f.id === feeId);
+  if (fee) {
+    $("#pendingItemLabel").value = fee.name;
+    $("#pendingItemAmount").value = fee.amount;
+  }
+});
+
+$("#addPendingItemBtn").addEventListener("click", () => {
+  const label = $("#pendingItemLabel").value.trim();
+  const amount = Number($("#pendingItemAmount").value);
+  if (!label) { showToast("Enter a description.", true); return; }
+  if (isNaN(amount)) { showToast("Enter a valid amount.", true); return; }
+  state._pendingLineItems.push({ id: uuid(), label, amount });
+  $("#pendingItemLabel").value = "";
+  $("#pendingItemAmount").value = "";
+  $("#pendingFeeCatalogSelect").value = "";
+  renderPendingLineItems();
+  recalcInvoiceTotal();
+});
+
+$("#createInvoiceBtn").addEventListener("click", async () => {
+  const ownerId = state.currentAccountOwnerId;
+  const owner = state.db.owners.find((o) => o.id === ownerId);
+  if (!owner) return;
+  const btn = $("#createInvoiceBtn");
+
+  const checkedBoxes = Array.from(document.querySelectorAll(".invoice-session-checkbox")).filter((cb) => cb.checked);
+  const selectedEventIds = checkedBoxes.map((cb) => cb.dataset.eventId);
+  const selectedEvents = (state._currentUnbilledEvents || []).filter((evt) => selectedEventIds.includes(evt.id));
+
+  if (!selectedEvents.length && !state._pendingLineItems.length) {
+    showToast("Select at least one session or add a line item.", true);
+    return;
+  }
+
+  const rate = effectiveRate(owner);
+  const lineItems = selectedEvents
+    .map((evt) => ({
+      id: uuid(),
+      kind: "session",
+      label: eventBillingLabel(evt),
+      date: eventDateStr(evt),
+      amount: rate,
+      eventId: evt.id,
+    }))
+    .concat(
+      state._pendingLineItems.map((item) => ({
+        id: uuid(),
+        kind: "fee",
+        label: item.label,
+        date: todayStr(),
+        amount: Number(item.amount),
+      }))
+    );
+
+  const total = lineItems.reduce((sum, li) => sum + Number(li.amount), 0);
+  const invoice = { id: uuid(), ownerId, date: todayStr(), lineItems, total, createdAt: new Date().toISOString() };
+
+  btn.disabled = true;
+  btn.textContent = "Creating invoice…";
+  try {
+    if (selectedEvents.length) await markEventsInvoiced(selectedEvents, invoice.id);
+    state.db.invoices.push(invoice);
+    await saveDb();
+    showToast(`Invoice created — $${total.toFixed(2)}`);
+    state._pendingLineItems = [];
+    await loadBillableEvents(true);
+    renderAccountProfile(ownerId);
+  } catch (err) {
+    const idx = state.db.invoices.findIndex((i) => i.id === invoice.id);
+    if (idx !== -1) state.db.invoices.splice(idx, 1);
+    showToast("Couldn't create invoice: " + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Create Invoice";
+  }
+});
+
+function renderInvoiceHistory(ownerId) {
+  const list = $("#invoiceHistoryList");
+  list.innerHTML = "";
+  const invoices = state.db.invoices.filter((i) => i.ownerId === ownerId).sort((a, b) => b.date.localeCompare(a.date));
+  if (!invoices.length) {
+    list.appendChild(el("p", { class: "empty-note" }, "No invoices yet."));
+    return;
+  }
+  invoices.forEach((inv) => {
+    const card = el("div", { class: "report-card" });
+    card.appendChild(
+      el(
+        "div",
+        { class: "report-card-head" },
+        el("div", { class: "report-card-date" }, fmtDateHuman(inv.date)),
+        el("div", { class: "report-card-rider" }, "$" + Number(inv.total).toFixed(2))
+      )
+    );
+    const itemsList = el("ul", { class: "muted small" });
+    inv.lineItems.forEach((li) => {
+      itemsList.appendChild(
+        el("li", {}, li.label + (li.date ? " (" + fmtDateShort(li.date) + ")" : "") + " — $" + Number(li.amount).toFixed(2))
+      );
+    });
+    card.appendChild(itemsList);
+    list.appendChild(card);
+  });
 }
 
 function renderReportCards(horseId) {

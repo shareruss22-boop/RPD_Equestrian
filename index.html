@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>RPD Equestrian</title>
-<link rel="stylesheet" href="styles.css?v=14" />
+<link rel="stylesheet" href="styles.css?v=15" />
 </head>
 <body>
 
@@ -19,6 +19,7 @@
         <button class="nav-link" data-route="horses">Horses</button>
         <button class="nav-link" data-route="students">Students</button>
         <button class="nav-link" data-route="owners">Owners</button>
+        <button class="nav-link" data-route="accounts">Accounts</button>
       </nav>
       <div class="topbar-right">
         <span id="userChip" class="user-chip" hidden></span>
@@ -150,6 +151,74 @@
       <div id="ownerHorseLinkRow" class="filter-row"></div>
       <div id="ownerHorseList" class="report-card-list"></div>
     </section>
+
+    <section id="accountsView" class="view" hidden>
+      <div class="view-header">
+        <h1>Accounts</h1>
+      </div>
+
+      <div class="week-schedule-card">
+        <h3>Fee Schedule</h3>
+        <div class="form-row">
+          <label>Default rate per session/lesson ($)<input type="number" id="defaultRateInput" min="0" step="1" /></label>
+          <button id="saveDefaultRateBtn" class="btn btn-ghost small">Save Default Rate</button>
+        </div>
+        <h4>Custom rates (grandfathered / discounted accounts)</h4>
+        <div id="rateOverridesList"></div>
+        <div class="form-row">
+          <select id="rateOverrideOwnerSelect"></select>
+          <input type="number" id="rateOverrideAmount" min="0" step="1" placeholder="$ rate" style="width:90px" />
+          <button id="addRateOverrideBtn" class="btn btn-ghost small">+ Add Custom Rate</button>
+        </div>
+      </div>
+
+      <div class="week-schedule-card">
+        <h3>Additional Fees</h3>
+        <p class="muted small">Reusable line items you can add to any invoice (blanket cleaning, late fee, etc).</p>
+        <div id="feeCatalogList"></div>
+        <div class="form-row">
+          <input type="text" id="newFeeName" placeholder="Fee name" />
+          <input type="number" id="newFeeAmount" min="0" step="0.01" placeholder="$" style="width:90px" />
+          <button id="addFeeCatalogBtn" class="btn btn-ghost small">+ Add Fee</button>
+        </div>
+      </div>
+
+      <div class="view-header">
+        <h2>Account Balances</h2>
+      </div>
+      <div id="accountsGrid" class="horses-grid"></div>
+    </section>
+
+    <section id="accountProfileView" class="view" hidden>
+      <button id="backToAccountsBtn" class="btn btn-ghost small">← Back to Accounts</button>
+      <div id="accountProfileHeader" class="horse-profile-header"></div>
+
+      <div class="view-header">
+        <h2>Unbilled Sessions</h2>
+      </div>
+      <div id="unbilledSessionsList"></div>
+
+      <div class="view-header">
+        <h2>Additional Line Items</h2>
+      </div>
+      <div id="pendingLineItemsList"></div>
+      <div class="form-row">
+        <select id="pendingFeeCatalogSelect"><option value="">— Custom item —</option></select>
+        <input type="text" id="pendingItemLabel" placeholder="Description" />
+        <input type="number" id="pendingItemAmount" min="0" step="0.01" placeholder="$" style="width:90px" />
+        <button id="addPendingItemBtn" class="btn btn-ghost small">+ Add Line Item</button>
+      </div>
+
+      <div class="profile-meta">
+        <span id="invoiceTotalLabel" style="font-weight:600">Total: $0.00</span>
+      </div>
+      <button id="createInvoiceBtn" class="btn btn-primary">Create Invoice</button>
+
+      <div class="view-header">
+        <h2>Invoice History</h2>
+      </div>
+      <div id="invoiceHistoryList" class="report-card-list"></div>
+    </section>
   </main>
 
   <!-- Add / Edit Horse Modal -->
@@ -173,10 +242,10 @@
           <label>Breed<input type="text" id="horseBreed" /></label>
           <label>Age<input type="text" id="horseAge" /></label>
         </div>
-        <label>Owner / same billing account as
+        <label>Owner/Lessor
           <span class="owner-select-row">
             <select id="horseOwnerId"></select>
-            <button type="button" id="horseAddOwnerBtn" class="btn btn-ghost small">+ New (not a student)</button>
+            <button type="button" id="horseAddOwnerBtn" class="btn btn-ghost small">+ New</button>
           </span>
         </label>
         <div class="form-row">
@@ -384,6 +453,6 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>
